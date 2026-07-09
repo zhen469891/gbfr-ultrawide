@@ -1,0 +1,40 @@
+# Build outputs
+build/
+dist/
+out/
+
+# Visual Studio / CMake
+.vs/
+*.user
+CMakeUserPresets.json
+
+# Build residue (listed for safety; normally only appears under build/, already covered above.
+# Note: the tracked third-party files in redist/ and vendor/ are .dll/.cpp/.h and are unaffected by these rules)
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Offline analysis tool build output
+tools/gbfr_analyze.exe
+tools/obj/
+
+# Installer runtime state (language preference written next to the exe)
+installer_lang.txt
+
+# Logs
+*.log
+
+# Editors / IDEs (personal settings, usually safe to ignore)
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
