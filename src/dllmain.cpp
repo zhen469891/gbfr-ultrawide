@@ -83,7 +83,7 @@ HMODULE baseModule = GetModuleHandle(NULL);
 // Logger and config setup
 inipp::Ini<char> ini;
 std::string sFixName = "GBFRUltrawide";
-std::string sFixVer = "0.1.0";
+std::string sFixVer = "0.1.1";
 std::string sLogFile = "GBFRUltrawide.log";
 std::string sConfigFile = "GBFRUltrawide.ini";
 std::string sExeName;

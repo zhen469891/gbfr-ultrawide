@@ -19,7 +19,7 @@ namespace GBFRUltrawideSetup
         /// Version of this bundle. MUST be kept in sync with the release tag
         /// (minus the leading 'v') when publishing a new release.
         /// </summary>
-        public const string CurrentVersion = "0.1.0";
+        public const string CurrentVersion = "0.1.1";
 
         private const string ReleasesApiUrl =
             "https://api.github.com/repos/zhen469891/gbfr-ultrawide/releases?per_page=10";
