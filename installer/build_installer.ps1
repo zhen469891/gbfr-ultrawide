@@ -54,9 +54,16 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Build complete: $exePath"
 
 # ---- Assemble payload ----
+# payload\ mirrors the game-directory layout: winmm.dll at the root, the GBFRUltrawide.*
+# files under scripts\. The installer deploys this tree verbatim, and a manual user can just
+# copy the contents of payload\ into their game folder.
+$payloadScriptsDir = Join-Path $payloadDir 'scripts'
+# Start from a clean payload dir so files from a previous build/layout don't linger.
+if (Test-Path $payloadDir) { Remove-Item -Recurse -Force $payloadDir }
 New-Item -ItemType Directory -Force $payloadDir | Out-Null
+New-Item -ItemType Directory -Force $payloadScriptsDir | Out-Null
 
-# winmm.dll (Ultimate ASI Loader x64) comes from redist\
+# winmm.dll (Ultimate ASI Loader x64) comes from redist\ -> payload\winmm.dll
 $winmm = Join-Path $repoRoot 'redist\winmm.dll'
 if (Test-Path $winmm) {
     Copy-Item $winmm (Join-Path $payloadDir 'winmm.dll') -Force
@@ -65,7 +72,7 @@ if (Test-Path $winmm) {
     Write-Warning "$winmm not found; payload is missing winmm.dll."
 }
 
-# GBFRUltrawide.asi / .ini: prefer dist\, otherwise take the newest build artifact from build\
+# GBFRUltrawide.asi / .ini: prefer dist\, otherwise the newest build\ artifact -> payload\scripts\
 foreach ($name in @('GBFRUltrawide.asi', 'GBFRUltrawide.ini')) {
     $src = Join-Path $repoRoot ("dist\" + $name)
     if (-not (Test-Path $src)) {
@@ -74,10 +81,10 @@ foreach ($name in @('GBFRUltrawide.asi', 'GBFRUltrawide.ini')) {
         if ($null -ne $found) { $src = $found.FullName } else { $src = $null }
     }
     if ($null -ne $src -and (Test-Path $src)) {
-        Copy-Item $src (Join-Path $payloadDir $name) -Force
-        Write-Host ("payload\" + $name + "  <-  " + $src)
+        Copy-Item $src (Join-Path $payloadScriptsDir $name) -Force
+        Write-Host ("payload\scripts\" + $name + "  <-  " + $src)
     } else {
-        $note = Join-Path $payloadDir ($name + '.MISSING.txt')
+        $note = Join-Path $payloadScriptsDir ($name + '.MISSING.txt')
         ("This build is missing " + $name + ". Run build.ps1 in the repo root first to produce dist\" + $name + ", then re-run installer\build_installer.ps1.") |
             Out-File -FilePath $note -Encoding utf8
         Write-Warning ($name + " not found; placed a note file in payload.")

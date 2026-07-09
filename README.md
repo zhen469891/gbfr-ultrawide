@@ -69,11 +69,15 @@ Run **`GBFRUltrawideSetup.exe`**. It:
 
 ### Option B — manual install
 
-1. Copy **`winmm.dll`** (the bundled Ultimate ASI Loader, x64) into the game root next to
-   `granblue_fantasy_relink.exe`.
-2. Copy **`GBFRUltrawide.asi`** and **`GBFRUltrawide.ini`** into the game's `scripts\`
-   folder (create it if it doesn't exist).
-3. Launch the game. A log is written to `scripts\GBFRUltrawide.log`.
+The release zip's **`payload\`** folder already mirrors the game-directory layout, so you can
+just copy its contents in:
+
+1. Copy the **contents of `payload\`** into the game folder next to
+   `granblue_fantasy_relink.exe`, so you end up with:
+   - `<game>\winmm.dll` (the bundled Ultimate ASI Loader, x64)
+   - `<game>\scripts\GBFRUltrawide.asi`
+   - `<game>\scripts\GBFRUltrawide.ini`
+2. Launch the game. A log is written to `scripts\GBFRUltrawide.log`.
 
 > **Steam Deck / Linux:** add `WINEDLLOVERRIDES="winmm=n,b" %command%` to the game's Steam
 > launch options so the loader is picked up.
@@ -123,8 +127,8 @@ powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ```
 
 It compiles `GBFRUltrawideSetup.exe` with the .NET Framework 4.x `csc.exe` and assembles
-the release layout (exe + `payload\` containing `winmm.dll`, `.asi`, `.ini`) under
-`installer\out\`.
+the release layout (exe + `payload\`, which mirrors the game layout: `winmm.dll` at the root
+and `scripts\GBFRUltrawide.{asi,ini}`) under `installer\out\`.
 
 ## Troubleshooting
 

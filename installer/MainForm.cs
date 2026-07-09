@@ -860,8 +860,11 @@ namespace GBFRUltrawideSetup
             }
 
             // --- payload check ---
+            // payload\ mirrors the game-directory layout (winmm.dll at the root, the
+            // GBFRUltrawide.* files under scripts\), so the same folder works both as this
+            // installer's source and as a "copy these into the game folder" manual install.
             string payloadDir = Path.Combine(AppDir, "payload");
-            string[] payloadFiles = new string[] { "winmm.dll", "GBFRUltrawide.asi", "GBFRUltrawide.ini" };
+            string[] payloadFiles = new string[] { "winmm.dll", AsiRelPath, IniRelPath };
             var missing = new List<string>();
             foreach (string f in payloadFiles)
             {
@@ -944,7 +947,7 @@ namespace GBFRUltrawideSetup
                 File.Copy(Path.Combine(payloadDir, "winmm.dll"), Path.Combine(game, "winmm.dll"), true);
                 Log(Strings.L("Install.DeployedLoader"));
 
-                File.Copy(Path.Combine(payloadDir, "GBFRUltrawide.asi"), Path.Combine(game, AsiRelPath), true);
+                File.Copy(Path.Combine(payloadDir, AsiRelPath), Path.Combine(game, AsiRelPath), true);
                 Log(Strings.L("Install.DeployedAsi"));
 
                 string iniDst = Path.Combine(game, IniRelPath);
@@ -954,7 +957,7 @@ namespace GBFRUltrawideSetup
                 }
                 else
                 {
-                    File.Copy(Path.Combine(payloadDir, "GBFRUltrawide.ini"), iniDst, false);
+                    File.Copy(Path.Combine(payloadDir, IniRelPath), iniDst, false);
                     Log(Strings.L("Install.DeployedIni"));
                 }
 

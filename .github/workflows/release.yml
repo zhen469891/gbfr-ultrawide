@@ -87,20 +87,16 @@ jobs:
           $tag  = "${{ github.event.release.tag_name }}"
           $root = "GBFRUltrawide-$tag"
 
-          # (a) Installer + the payload it deploys from
-          New-Item -ItemType Directory -Force -Path "$root\payload" | Out-Null
+          # payload\ mirrors the game-directory layout: winmm.dll at the root, the
+          # GBFRUltrawide.* files under scripts\. The installer deploys this tree verbatim,
+          # and a manual user can just copy the CONTENTS of payload\ into their game folder.
+          New-Item -ItemType Directory -Force -Path "$root\payload\scripts" | Out-Null
           Copy-Item artifacts\installer\GBFRUltrawideSetup.exe "$root\GBFRUltrawideSetup.exe"
           Copy-Item redist\winmm.dll                           "$root\payload\winmm.dll"
-          Copy-Item artifacts\plugin\GBFRUltrawide.asi         "$root\payload\GBFRUltrawide.asi"
-          Copy-Item ini\GBFRUltrawide.ini                      "$root\payload\GBFRUltrawide.ini"
+          Copy-Item artifacts\plugin\GBFRUltrawide.asi         "$root\payload\scripts\GBFRUltrawide.asi"
+          Copy-Item ini\GBFRUltrawide.ini                      "$root\payload\scripts\GBFRUltrawide.ini"
 
-          # (b) Manual-install layout: copy this folder's CONTENTS into the game directory
-          New-Item -ItemType Directory -Force -Path "$root\manual-install\scripts" | Out-Null
-          Copy-Item redist\winmm.dll                   "$root\manual-install\winmm.dll"
-          Copy-Item artifacts\plugin\GBFRUltrawide.asi "$root\manual-install\scripts\GBFRUltrawide.asi"
-          Copy-Item ini\GBFRUltrawide.ini              "$root\manual-install\scripts\GBFRUltrawide.ini"
-
-          # (c) Short readme covering both install paths
+          # Short readme covering both install paths
           $readme = @"
           GBFRUltrawide $tag - ultrawide (21:9 / 32:9) fix for Granblue Fantasy Relink v2.0.2
 
@@ -109,7 +105,7 @@ jobs:
             files, installs, and gives you a GUI to change settings.
 
           MANUAL - no installer:
-            Copy the CONTENTS of the manual-install\ folder into your game folder
+            Copy the CONTENTS of the payload\ folder into your game folder
             (...\steamapps\common\Granblue Fantasy Relink) so you end up with:
               <game>\winmm.dll
               <game>\scripts\GBFRUltrawide.asi
