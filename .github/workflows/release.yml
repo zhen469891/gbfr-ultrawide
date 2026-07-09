@@ -20,7 +20,10 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    # Pinned to windows-2022: it ships Visual Studio 2022, which the CMake
+    # "Visual Studio 17 2022" generator needs. windows-latest (windows-2025)
+    # fails to locate a VS instance for that generator.
+    runs-on: windows-2022
 
     steps:
       # 1. Check out the source

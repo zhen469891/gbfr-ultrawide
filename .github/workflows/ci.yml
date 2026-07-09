@@ -1,16 +1,19 @@
 name: CI
 
-# Triggers: pushes to main and pull requests targeting main.
+# Triggers: pull requests targeting main, plus manual dispatch.
+# (Intentionally NOT on push - a compile check on every push to a solo repo isn't worth the minutes.)
 # Purpose: verify that both the plugin and the installer compile (no release) and upload artifacts for debugging.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Pinned to windows-2022: it ships Visual Studio 2022, which the CMake
+    # "Visual Studio 17 2022" generator needs. windows-latest (windows-2025)
+    # fails to locate a VS instance for that generator.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
