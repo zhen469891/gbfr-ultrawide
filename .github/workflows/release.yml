@@ -1,154 +1,130 @@
 name: Release
 
-# Triggers:
-#   1. Pushing a tag matching v* (e.g. v1.0.0) builds and publishes a release automatically
-#   2. workflow_dispatch for manual testing (you supply the version)
+# Trigger: a GitHub Release being published (works for pre-releases too).
+# You create the release in the GitHub UI (tick "Set as a pre-release" if you want);
+# this workflow then builds the plugin and installer IN PARALLEL, bundles a single
+# ready-to-use zip, and uploads it back onto that same release. The workflow never
+# creates or flips the release itself, so your pre-release choice is preserved.
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Version tag for manual testing (e.g. v0.0.0-test)'
-        required: true
-        default: 'v0.0.0-test'
+  release:
+    types: [published]
 
-# Publishing a release requires write permission
+# Uploading assets onto the release needs write access.
 permissions:
   contents: write
 
 jobs:
-  release:
-    # Pinned to windows-2022: it ships Visual Studio 2022, which the CMake
-    # "Visual Studio 17 2022" generator needs. windows-latest (windows-2025)
-    # fails to locate a VS instance for that generator.
-    runs-on: windows-2022
-
+  # ---- Line 1: build the ASI plugin (CMake + MSVC) ----
+  plugin:
+    runs-on: windows-2022  # ships VS2022, which the "Visual Studio 17 2022" generator needs
     steps:
-      # 1. Check out the source
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # Resolve the version: use github.ref_name for pushed tags, the input value for manual runs.
-      # Later steps always reference it via ${{ env.TAG }}.
-      - name: Resolve version tag
-        id: version
-        shell: pwsh
-        run: |
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
-            '${{ github.event.inputs.tag }}'
-          } else {
-            '${{ github.ref_name }}'
-          }
-          "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # Mark as a pre-release for 0.x versions or any tag with a pre-release suffix (e.g. -beta, -rc1).
-          $isPre = ($tag -match '^v0\.') -or ($tag -match '-')
-          "PRERELEASE=$($isPre.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Release tag: $tag (prerelease: $($isPre.ToString().ToLower()))"
-
-      # 2. MSVC toolchain (windows-latest already ships VS2022, so we just use
-      #    CMake's Visual Studio 17 2022 generator; no extra action is needed and
-      #    cmake is preinstalled on the runner).
-
-      # 3. Build the plugin: CMake configure + build Release, producing build\Release\GBFRUltrawide.asi
-      #    (equivalent to build.ps1, but calls cmake directly in the workflow instead of the build script)
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Configure (CMake)
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-
       - name: Build plugin (Release)
         run: cmake --build build --config Release
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin
+          path: build/Release/GBFRUltrawide.asi
+          if-no-files-found: error
 
-      # Collect the plugin and ini into dist\ for the later installer build and packaging (mirrors build.ps1's dist layout)
-      - name: Collect plugin artifacts into dist\
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item build\Release\GBFRUltrawide.asi dist\ -Force
-          Copy-Item ini\GBFRUltrawide.ini dist\ -Force
-          Get-ChildItem dist\
-
-      # 4. Build the installer: compile installer\*.cs with the csc.exe bundled in .NET Framework 4.8
-      #    (equivalent to the compile step in build_installer.ps1, but calls csc directly in the workflow instead of the script)
+  # ---- Line 2: build the installer (csc.exe) — independent of the plugin, runs at the same time ----
+  installer:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Build installer (csc.exe)
         shell: pwsh
         run: |
           $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          if (-not (Test-Path $csc)) {
-            $csc = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
-          }
+          if (-not (Test-Path $csc)) { $csc = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
           if (-not (Test-Path $csc)) { throw "Could not find .NET Framework csc.exe (v4.0.30319)." }
           Write-Host "Using compiler: $csc"
-
-          New-Item -ItemType Directory -Force -Path installer\out | Out-Null
-          $exe = "installer\out\GBFRUltrawideSetup.exe"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
           # Glob every .cs so new source files (e.g. Strings.cs) are picked up automatically
           $sources = @(Get-ChildItem installer\*.cs | ForEach-Object { $_.FullName })
-
           & $csc `
-            /nologo `
-            /target:winexe `
-            /platform:anycpu `
-            /optimize+ `
-            /codepage:65001 `
+            /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
             /win32manifest:installer\app.manifest `
-            /r:System.dll `
-            /r:System.Core.dll `
-            /r:System.Windows.Forms.dll `
-            /r:System.Drawing.dll `
-            "/out:$exe" `
-            $sources
+            /r:System.dll /r:System.Core.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
+            /out:out\GBFRUltrawideSetup.exe $sources
           if ($LASTEXITCODE -ne 0) { throw "csc.exe build failed (exit code $LASTEXITCODE)." }
-          Write-Host "Build complete: $exe"
-
-      # Assemble the installer payload\ (winmm.dll from redist\, asi/ini from dist\)
-      - name: Assemble installer payload
-        shell: pwsh
-        run: |
-          $payload = "installer\out\payload"
-          New-Item -ItemType Directory -Force -Path $payload | Out-Null
-          Copy-Item redist\winmm.dll        (Join-Path $payload 'winmm.dll') -Force
-          Copy-Item dist\GBFRUltrawide.asi  (Join-Path $payload 'GBFRUltrawide.asi') -Force
-          Copy-Item dist\GBFRUltrawide.ini  (Join-Path $payload 'GBFRUltrawide.ini') -Force
-          Get-ChildItem -Recurse installer\out
-
-      # 5. Assemble the release packages
-      #    (a) Manual package: mirrors the layout a user extracts into the game root
-      #        - winmm.dll (ASI loader, placed in the game root)
-      #        - scripts\GBFRUltrawide.asi
-      #        - scripts\GBFRUltrawide.ini
-      #    (b) Installer package: GBFRUltrawideSetup.exe + payload\{winmm.dll, asi, ini}
-      - name: Stage release packages
-        shell: pwsh
-        run: |
-          $tag = $env:TAG
-
-          # (a) Manual package staging
-          $manual = "staging\manual"
-          New-Item -ItemType Directory -Force -Path "$manual\scripts" | Out-Null
-          Copy-Item redist\winmm.dll        "$manual\winmm.dll" -Force
-          Copy-Item dist\GBFRUltrawide.asi  "$manual\scripts\GBFRUltrawide.asi" -Force
-          Copy-Item dist\GBFRUltrawide.ini  "$manual\scripts\GBFRUltrawide.ini" -Force
-          Compress-Archive -Path "$manual\*" -DestinationPath "GBFRUltrawide-$tag.zip" -Force
-
-          # (b) Installer package staging (exe plus payload\)
-          $setup = "staging\setup"
-          New-Item -ItemType Directory -Force -Path $setup | Out-Null
-          Copy-Item installer\out\GBFRUltrawideSetup.exe "$setup\GBFRUltrawideSetup.exe" -Force
-          Copy-Item installer\out\payload "$setup\payload" -Recurse -Force
-          Compress-Archive -Path "$setup\*" -DestinationPath "GBFRUltrawideSetup-$tag.zip" -Force
-
-          Write-Host "Packaging complete:"
-          Get-ChildItem "GBFRUltrawide-$tag.zip", "GBFRUltrawideSetup-$tag.zip"
-
-      # 6. Create/update the release and upload both zips; auto-generate release notes
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+          Write-Host "Build complete: out\GBFRUltrawideSetup.exe"
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v7
         with:
-          tag_name: ${{ env.TAG }}
-          name: ${{ env.TAG }}
-          generate_release_notes: true
-          prerelease: ${{ env.PRERELEASE }}
-          files: |
-            GBFRUltrawide-${{ env.TAG }}.zip
-            GBFRUltrawideSetup-${{ env.TAG }}.zip
+          name: installer
+          path: out/GBFRUltrawideSetup.exe
+          if-no-files-found: error
+
+  # ---- Join: combine both build outputs into one ready-to-use zip, attach to the release ----
+  package:
+    needs: [plugin, installer]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: plugin
+          path: artifacts/plugin
+      - name: Download installer artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: installer
+          path: artifacts/installer
+      - name: Assemble single ready-to-use package
+        shell: pwsh
+        run: |
+          $tag  = "${{ github.event.release.tag_name }}"
+          $root = "GBFRUltrawide-$tag"
+
+          # (a) Installer + the payload it deploys from
+          New-Item -ItemType Directory -Force -Path "$root\payload" | Out-Null
+          Copy-Item artifacts\installer\GBFRUltrawideSetup.exe "$root\GBFRUltrawideSetup.exe"
+          Copy-Item redist\winmm.dll                           "$root\payload\winmm.dll"
+          Copy-Item artifacts\plugin\GBFRUltrawide.asi         "$root\payload\GBFRUltrawide.asi"
+          Copy-Item ini\GBFRUltrawide.ini                      "$root\payload\GBFRUltrawide.ini"
+
+          # (b) Manual-install layout: copy this folder's CONTENTS into the game directory
+          New-Item -ItemType Directory -Force -Path "$root\manual-install\scripts" | Out-Null
+          Copy-Item redist\winmm.dll                   "$root\manual-install\winmm.dll"
+          Copy-Item artifacts\plugin\GBFRUltrawide.asi "$root\manual-install\scripts\GBFRUltrawide.asi"
+          Copy-Item ini\GBFRUltrawide.ini              "$root\manual-install\scripts\GBFRUltrawide.ini"
+
+          # (c) Short readme covering both install paths
+          $readme = @"
+          GBFRUltrawide $tag - ultrawide (21:9 / 32:9) fix for Granblue Fantasy Relink v2.0.2
+
+          RECOMMENDED - use the installer:
+            Run GBFRUltrawideSetup.exe. It auto-detects the game, backs up any existing
+            files, installs, and gives you a GUI to change settings.
+
+          MANUAL - no installer:
+            Copy the CONTENTS of the manual-install\ folder into your game folder
+            (...\steamapps\common\Granblue Fantasy Relink) so you end up with:
+              <game>\winmm.dll
+              <game>\scripts\GBFRUltrawide.asi
+              <game>\scripts\GBFRUltrawide.ini
+
+          Uninstall: delete winmm.dll and the scripts\GBFRUltrawide.* files (or use the installer).
+          "@
+          $readme | Out-File -Encoding utf8 "$root\README.txt"
+
+          Compress-Archive -Path "$root" -DestinationPath "GBFRUltrawide-$tag.zip" -Force
+          Get-ChildItem "GBFRUltrawide-$tag.zip"
+      - name: Upload package onto the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" `
+            "GBFRUltrawide-${{ github.event.release.tag_name }}.zip" --clobber
