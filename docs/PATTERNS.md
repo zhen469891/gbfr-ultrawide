@@ -281,15 +281,16 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Hunt method:** anchored on the HUD default globals 1920/1080 (§2.4, 0x06B84098/9C). `xref 06B84098` → 274 candidates; `classify_xrefs.ps1` (rip-relative `cmp`, opcode 39/3B) narrowed to the single `.text` resolution `cmp` @ RVA 0x00231BE3, which localized both sites.
 - **Confidence:** HIGH.
 
-### 3.10 UIMarkers (`HUDFix`)
+### 3.10 UIMarkersCanvas (`HUDFix`) — replaces v1 "UIMarkers"
 
-- **Feature:** world→screen marker projection (marker positions off at non-16:9).
-- **Pattern:** `C4 ?? ?? 21 ?? 10 C4 ?? ?? 21 ?? 30 C4 ?? ?? 0C ?? 04 C5 ?? ?? ?? BC 01 00 00 C5 ?? ?? ?? C0 01 00 00` (vinsertps×2 + vblendps + `vmovss[+0x1BC]` + `vmovss[+0x1C0]`).
-- **Hits / RVA:** unique @ RVA 0x026812CD; hook **+0x12** (RVA 0x026812DF, first `vmovss`, after three 6-byte AVX instructions). The fallback-branch jmp also lands here, covering both control-flow paths.
-- **Hook semantics:** base register is **RAX** (v1 was rcx; loaded from `[rsi+0x2410]`, verified not clobbered). `if aspect<16:9: *(float*)(rax+0x1C0) = 2160 + fHUDHeightOffset; else if aspect>16:9: *(float*)(rax+0x1BC) = 2160 * fAspectRatio`.
-- **v1→v2:** struct shift −0x38 (§2.1) + codegen change; v1 prefix `mov reg,[reg+0x20]` sequence gone entirely.
-- **Hunt method:** v1 pattern + variants = 0 hits. `scan` the width/height pair `BC 01 00 00 … C0 01 00 00` → 42 hits, each classified by disassembling ~0x28 bytes before each hit; 29 STORE pairs rejected (clamp/copy boilerplate), LOAD pairs triaged (rejected keyframes, HUDConstraints, canvas-ratio, UI quads, flow-layout, a 20-case anchor jump table) until one unique site remained.
-- **Confidence:** **MEDIUM-HIGH** (unique hit, semantic lineage, blast radius limited to the marker canvas; runtime marker check recommended). **Fallbacks:** anchor switch @ RVA 0x04276C42, canvas-ratio @ RVA 0x026D9446; simpler patterns `C4 ?? ?? 0C ?? 04 …` (hook +0x6) and `C5 ?? ?? ?? BC 01 00 00 … 76 ??` (hook +0x0).
+- **Feature:** world-anchored UI positioning (enemy HP bars, damage numbers, lock-on marker) offset horizontally at non-16:9. Uniform +440 px right shift at 3440×1440 = the pillarbox width (3440−2560)/2.
+- **Root cause (v2):** world→screen widget positioning is inlined ~51× (all copies share the behind-camera guard const @ 0x054A5BD0 — `xref` it to enumerate them) and computes `canvasX = screenX/scale − canvasW/2` from the **global canvas manager** `[0x07C02358]` (scaleX +0x17C, −scaleY +0x180, scale +0x184, source W/H +0x1B4/+0x1B8, current W/H +0x1BC/+0x1C0). Rendering maps back through `windowW/2 + canvasX·scale`, so positions are only correct while **canvasW × scale == windowW**. Vanilla fill-width satisfies this by construction; the ADR-0004 fit-height patch (scale = H/2160) broke it.
+- **Fix site:** the CanvasFitHeight pattern (§2.6) **+0x40** (RVA 0x0015FB08, `mov rsi,[rip+…]` right after the three scale stores; **rax = canvas manager**). Mid-hook writes **both** source and current fields: W (+0x1B4 and +0x1BC) = `2160*fAspectRatio` at >16:9; H (+0x1B8 and +0x1C0) = `3840/fAspectRatio` at <16:9. Byte-checked (`48 8B 35`) before hooking.
+- **Why the source field matters:** +0x1BC/+0x1C0 are DERIVED — the dirty-layout recalc (RVA 0x0261C5D0, invoked for every dirty canvas from 0x02524B80 / 0x0214E641) copies +0x1B4/+0x1B8 over them each dirty frame. Writing only +0x1BC gets washed back to 3840 before combat; writing the source field makes the game's own recalc propagate 5160 for us. Runtime-verified: zero clobbers across a full combat session.
+- **v1 "UIMarkers" is dead in v2:** the relocated per-widget site (RVA 0x026812CD) is a mode-gated corner-anchored one-off widget (unique −95/−30 px constants, one xref in the exe) that HITs but never FIREs in gameplay — hook removed.
+- **Runtime-verified consumers** (breadcrumbs for the next port): positioner fn 0x02648970 ("HP-bar shaped", r14=mgr, W read @ 0x026489F4) and fn 0x02652B90 (rbx=mgr, W read @ 0x02652C27) both fired in combat reading W=5160; shared world→screen helper @ RVA 0x00962FD0.
+- **Known residual risk:** off-screen culling reads the widget's own canvas node (`[widget+0x10]`, ±W/2·margin bounds @ 0x026D4FF0 family), not the manager — if world-anchored widgets vanish near the ultrawide edges, the hosting named canvas (41-node table @ 0x05A3CA70) needs the same width treatment.
+- **Confidence:** **HIGH** (runtime-verified in combat at 3440×1440). See ADR-0006 for the full diagnosis.
 
 ### 3.11 UIBackgrounds (`HUDFix`)
 
@@ -385,4 +386,6 @@ pattern like this:
    `dllmain.cpp` header, and add a `HIT`/`FIRED` log line so the next failure is diagnosable.
 8. **Verify at runtime.** A `HIT` only means the bytes exist; a `FIRED` means the hook ran.
    Watch for a `HIT` with no `FIRED` (found a dead/duplicate copy) and, for MEDIUM-confidence
-   patterns (LODDistance, UIMarkers), confirm the visible effect in-game.
+   patterns (LODDistance), confirm the visible effect in-game. The v1 "UIMarkers" port is the
+   cautionary tale: unique hit, plausible semantics, but a mode-gated path that never ran —
+   only the missing `FIRED` line exposed it (see ADR-0006).

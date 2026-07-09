@@ -34,9 +34,20 @@
 //   [REFOUND v2.0.2] UIAspect    (HUDFix)       - v1 single pattern replaced by two patterns/sites: patch site
 //                                                RVA 0x00231BDD (P1+0xC: 0F 85 -> 90 E9) + hook site RVA
 //                                                0x00231F10 (P2+0xA); both must hit or the fix is skipped
-//   [REFOUND v2.0.2] UIMarkers   (HUDFix)       - new pattern (unique hit RVA 0x026812CD), hook +0xA -> +0x12,
-//                                                lambda base register rcx -> rax; confidence: MEDIUM-HIGH
-//                                                (semantic lineage, runtime marker check recommended)
+//   [REWORKED v2.0.2] UIMarkers  (HUDFix)       - v1 site (RVA 0x026812CD) is a DEAD corner-widget path in v2:
+//                                                HIT but never FIRED in combat (diagnosed 2026-07-10). The real
+//                                                world->screen widget math is inlined 51x and reads the GLOBAL
+//                                                canvas manager [0x07C02358]; its positioning assumes
+//                                                canvasW*scale == windowW, an invariant the CanvasFitHeight
+//                                                patch broke (=> uniform +440px right shift of health bars /
+//                                                damage numbers / lock-on at 3440x1440). Fix "UIMarkersCanvas":
+//                                                hook the CanvasFitHeight scale-store site at +0x40 (rax =
+//                                                canvas manager) and write BOTH source W/H (+0x1B4/+0x1B8)
+//                                                and current W/H (+0x1BC/+0x1C0) = 2160*aspect (>16:9) or
+//                                                3840/aspect (<16:9). +0x1BC alone gets washed back to 3840
+//                                                by the dirty-layout recalc (RVA 0x0261C5D0), which copies
+//                                                +0x1B4 over it every dirty frame; writing the source field
+//                                                makes the recalc propagate our value instead. (ADR-0006)
 //   [REFOUND v2.0.2] GfxCorruption1 (GraphicalFixes) - new pattern, 4 hits (branch arms of one function) and ALL
 //                                                are hooked at +0x8 (was: first hit @ +0x0). Hooked value is
 //                                                width/64, not width/32 as v1 assumed; Cygames' v2.0.2 code
@@ -786,22 +797,37 @@ void HUDFix()
 {
     if (bHUDFix)
     {
-        if (fAspectRatio > fNativeAspect)
+        // [REWORKED v2.0.2] v1's "UIAspect" trick (force the UI ortho width to 16:9) is
+        // the wrong tool for v2 and has been REPLACED (hunt_scalecrop.txt). In v2 every
+        // named canvas (41 of them, all 3840x2160 units, center pivot) is mapped to the
+        // screen through a single scale chosen at RVA 0x0015FAB8:
+        //     scaleX = windowRefW / 3840, scaleY = windowRefH / 2160
+        //     scale  = scaleX + (scaleY - scaleX) * t     with t HARDCODED to 0
+        // i.e. always fill-width. On 21:9 the 16:9 canvas then overflows vertically by
+        // (W/3840)/(H/2160) = 1.34375 and the whole frame looks zoomed/cropped.
+        // NOPing the lerp's multiply ("vmulss xmm1,xmm1,xmm2" at pattern+0x18) turns the
+        // expression into scaleX + (scaleY - scaleX) = scaleY -> fit-height: the UI sits
+        // in the centered 16:9 area (the v1 look), and the scene-crop-factor fix in the
+        // ScreenEffects hook lets the 3D span the full window width.
+        //
+        // [NEW 2026-07-10] UIMarkersCanvas - the REAL markers fix. The lerp result is stored
+        // to the global canvas manager right after the pattern:
+        //     +0x28  vmovss [rax+0x17C], xmm0   ; scaleX  (rax = canvas manager [0x07C02358])
+        //     +0x30  vmovss [rax+0x180], xmm1   ; -scaleY (negated for y-flip)
+        //     +0x38  vmovss [rax+0x184], xmm0   ; scale
+        //     +0x40  mov rsi, [rip+...]         ; <- hook here, rax still = canvas manager
+        // World-anchored widgets (enemy HP bars, damage numbers, lock-on) compute
+        //     canvasX = screenX/scale - canvasW/2
+        // and rendering maps that back through windowW/2 + canvasX*scale, so positions are
+        // only correct while canvasW*scale == windowW. Vanilla fill-width satisfies this;
+        // our fit-height NOP broke it (uniform +440px right shift at 3440x1440). Writing
+        // canvasW = 2160*aspect (>16:9) / canvasH = 3840/aspect (<16:9) at the same site
+        // that stores the scale restores the invariant for all ~51 inlined projection
+        // copies at once. (Offline analysis: hunt_uimarkers.txt + 2026-07-10 session.)
+        uint8_t* CanvasScaleScanResult = Memory::PatternScan(baseModule, "C5 FA 59 05 ?? ?? ?? ?? C5 F2 59 0D ?? ?? ?? ?? C5 F2 5C C8");
+        if (CanvasScaleScanResult)
         {
-            // [REWORKED v2.0.2] v1's "UIAspect" trick (force the UI ortho width to 16:9) is
-            // the wrong tool for v2 and has been REPLACED (hunt_scalecrop.txt). In v2 every
-            // named canvas (41 of them, all 3840x2160 units, center pivot) is mapped to the
-            // screen through a single scale chosen at RVA 0x0015FAB8:
-            //     scaleX = windowRefW / 3840, scaleY = windowRefH / 2160
-            //     scale  = scaleX + (scaleY - scaleX) * t     with t HARDCODED to 0
-            // i.e. always fill-width. On 21:9 the 16:9 canvas then overflows vertically by
-            // (W/3840)/(H/2160) = 1.34375 and the whole frame looks zoomed/cropped.
-            // NOPing the lerp's multiply ("vmulss xmm1,xmm1,xmm2" at pattern+0x18) turns the
-            // expression into scaleX + (scaleY - scaleX) = scaleY -> fit-height: the UI sits
-            // in the centered 16:9 area (the v1 look), and the scene-crop-factor fix in the
-            // ScreenEffects hook lets the 3D span the full window width.
-            uint8_t* CanvasScaleScanResult = Memory::PatternScan(baseModule, "C5 FA 59 05 ?? ?? ?? ?? C5 F2 59 0D ?? ?? ?? ?? C5 F2 5C C8");
-            if (CanvasScaleScanResult)
+            if (fAspectRatio > fNativeAspect)
             {
                 if (CanvasScaleScanResult[0x18] == 0xC5 && CanvasScaleScanResult[0x19] == 0xF2 &&
                     CanvasScaleScanResult[0x1A] == 0x59 && CanvasScaleScanResult[0x1B] == 0xCA)
@@ -815,49 +841,70 @@ void HUDFix()
                     LogError("CanvasFitHeight: bytes at +0x18 are not the expected vmulss - patch skipped");
                 }
             }
-            else
+
+            if (fAspectRatio != fNativeAspect)
             {
-                LogError("MISS: CanvasFitHeight pattern not found - UI stays fill-width (zoomed/cropped)");
-            }
-        }
-
-        // [REFOUND v2.0.2] Fix markers being off - confidence MEDIUM-HIGH.
-        // New pattern is unique, hit at RVA 0x026812CD; v1 prefix codegen is gone so the
-        // lineage is semantic: world->screen marker projection (world anchor * camera matrix,
-        // viewport transform, behind-camera fallback) combined with the marker canvas w/h.
-        // Hook moved +0xA -> +0x12 (start of the 8-byte "vmovss xmm2,[rax+0x1BC]", after
-        // three 6-byte AVX instructions); the fallback branch jmp also lands exactly there,
-        // so both control-flow paths are covered. Base register changed rcx -> rax in v2
-        // (rax = marker canvas object, loaded from [rsi+0x2410]; verified not clobbered).
-        // If markers are still off at runtime, fallback candidates are RVA 0x04276C42
-        // (anchor switch) and 0x026D9446 (canvas-ratio) - see hunt_uimarkers.txt.
-        uint8_t* UIMarkersScanResult = Memory::PatternScan(baseModule, "C4 ?? ?? 21 ?? 10 C4 ?? ?? 21 ?? 30 C4 ?? ?? 0C ?? 04 C5 ?? ?? ?? BC 01 00 00 C5 ?? ?? ?? C0 01 00 00");
-        if (UIMarkersScanResult)
-        {
-            UIMarkersScanResult += 0x12; // hook offset (v2.0.2: pattern + 0x12)
-            LogInfo("HIT: UIMarkers: %s+0x%llx", sExeName.c_str(), ModOffset(UIMarkersScanResult));
-
-            static SafetyHookMid UIMarkersMidHook{};
-            UIMarkersMidHook = safetyhook::create_mid(UIMarkersScanResult,
-                [](SafetyHookContext& ctx)
+                if (CanvasScaleScanResult[0x40] == 0x48 && CanvasScaleScanResult[0x41] == 0x8B &&
+                    CanvasScaleScanResult[0x42] == 0x35)
                 {
-                    static std::atomic<bool> logged{ false };
-                    if (!logged.exchange(true)) LogInfo("FIRED: UIMarkers");
+                    LogInfo("HIT: UIMarkersCanvas: %s+0x%llx (hook at +0x40)",
+                        sExeName.c_str(), ModOffset(CanvasScaleScanResult + 0x40));
 
-                    if (fAspectRatio < fNativeAspect)
-                    {
-                        *reinterpret_cast<float*>(ctx.rax + 0x1C0) = (float)2160 + fHUDHeightOffset;
-                    }
-                    else if (fAspectRatio > fNativeAspect)
-                    {
-                        *reinterpret_cast<float*>(ctx.rax + 0x1BC) = (float)2160 * fAspectRatio;
-                    }
-                });
+                    static SafetyHookMid UIMarkersCanvasMidHook{};
+                    UIMarkersCanvasMidHook = safetyhook::create_mid(CanvasScaleScanResult + 0x40,
+                        [](SafetyHookContext& ctx)
+                        {
+                            float fScale = *reinterpret_cast<float*>(ctx.rax + 0x17C);
+                            float fOldW = *reinterpret_cast<float*>(ctx.rax + 0x1BC);
+                            float fOldH = *reinterpret_cast<float*>(ctx.rax + 0x1C0);
+
+                            // +0x1BC/+0x1C0 (current W/H) is a DERIVED value: the layout
+                            // recalc at RVA 0x0261C5D0 copies +0x1B4/+0x1B8 (source W/H)
+                            // over it whenever the canvas is dirty - which happens
+                            // constantly in combat. Writing only +0x1BC gets washed back
+                            // to 3840 (round-2 offline analysis, writer W4). So write the
+                            // SOURCE fields too: the recalc then propagates our value.
+                            if (fAspectRatio > fNativeAspect)
+                            {
+                                *reinterpret_cast<float*>(ctx.rax + 0x1B4) = (float)2160 * fAspectRatio;
+                                *reinterpret_cast<float*>(ctx.rax + 0x1BC) = (float)2160 * fAspectRatio;
+                            }
+                            else if (fAspectRatio < fNativeAspect)
+                            {
+                                *reinterpret_cast<float*>(ctx.rax + 0x1B8) = (float)3840 / fAspectRatio;
+                                *reinterpret_cast<float*>(ctx.rax + 0x1C0) = (float)3840 / fAspectRatio;
+                            }
+
+                            static std::atomic<int> fireCount{ 0 };
+                            int iFire = ++fireCount;
+                            if (iFire <= 5)
+                                LogInfo("FIRED: UIMarkersCanvas #%d: scale=%.4f canvas %.0fx%.0f -> %.0fx%.0f",
+                                    iFire, fScale, fOldW, fOldH,
+                                    *reinterpret_cast<float*>(ctx.rax + 0x1BC),
+                                    *reinterpret_cast<float*>(ctx.rax + 0x1C0));
+                        });
+                }
+                else
+                {
+                    LogError("UIMarkersCanvas: bytes at +0x40 are not the expected mov rsi,[rip+disp32] - hook skipped, world-anchored UI will be offset");
+                }
+            }
         }
         else
         {
-            LogError("MISS: UIMarkers pattern not found - feature disabled");
+            LogError("MISS: CanvasFitHeight pattern not found - UI stays fill-width (zoomed/cropped) and world-anchored UI stays offset");
         }
+
+        // [REMOVED v2.0.2] v1's per-widget "UIMarkers" hook. Its v2 relocation (RVA
+        // 0x026812CD) turned out to be a mode-gated corner-anchored one-off widget path
+        // that never executes in gameplay; the real world->screen positioning is inlined
+        // ~51x and reads the global canvas manager, fixed by UIMarkersCanvas above.
+        // Full story in docs/adr/0006-canvas-manager-invariant-fix.md.
+
+        // Runtime-verified consumers of the manager W (2026-07-10 diagnostic session):
+        // the "HP bar shaped" positioner fn 0x02648970 and fn 0x02652B90 both fired in
+        // combat reading W=5160 from the manager; the shared WorldToScreen helper is
+        // RVA 0x00962FD0. Kept here as breadcrumbs for the next game-version port.
 
         // [FIXED v2.0.2] Span backgrounds - struct offsets shifted -0x38, width now in xmm1,
         // <16:9 hook moved base+0x28 -> base+0x29 (v1 offset landed inside the 8-byte vmovss xmm4,[rax+0x1C0])
@@ -965,6 +1012,12 @@ void HUDFix()
                 {
                     static std::atomic<bool> logged{ false };
                     if (!logged.exchange(true)) LogInfo("FIRED: HUDConstraints");
+
+                    // NOTE (2026-07-10 diagnostic): none of the three v1 object IDs below
+                    // appeared among the 60+ unique IDs observed flowing through this hook
+                    // on v2.0.2, and +0x194/+0x198 read as normalized anchors (0.5), not
+                    // pixel offsets. The ID-gated writes below are almost certainly inert
+                    // on v2 and need a re-hunt if Span HUD misbehaves. (ADR-0006 appendix)
 
                     // Gameplay HUD = 1719602056
                     if (*reinterpret_cast<int*>(ctx.rax + 0x1C4) == (int)1719602056)
