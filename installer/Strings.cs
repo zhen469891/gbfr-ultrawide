@@ -127,6 +127,11 @@ namespace GBFRUltrawideSetup
             d["Lang.English"] = "English";
             d["Lang.TradChinese"] = "繁體中文";
 
+            // Update check
+            d["Update.Available"] = "⚠ New version {0} available (current: {1}) — click here to download";
+            d["Update.CheckFailed"] = "Update check failed: {0}";
+            d["Update.OpenFailed"] = "Could not open the download page: {0}";
+
             // Install tab - game path
             d["Install.PathGroup"] = "Game folder (Granblue Fantasy Relink install directory)";
             d["Install.Browse"] = "Browse…";
@@ -295,6 +300,11 @@ namespace GBFRUltrawideSetup
             d["Lang.Label"] = "語言：";
             d["Lang.English"] = "English";
             d["Lang.TradChinese"] = "繁體中文";
+
+            // Update check
+            d["Update.Available"] = "⚠ 偵測到新版本 {0}（目前 {1}），點此前往下載頁";
+            d["Update.CheckFailed"] = "版本檢查失敗：{0}";
+            d["Update.OpenFailed"] = "無法開啟下載頁：{0}";
 
             // Install tab - game path
             d["Install.PathGroup"] = "遊戲路徑（Granblue Fantasy Relink 安裝資料夾）";

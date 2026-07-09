@@ -23,6 +23,8 @@ namespace GBFRUltrawideSetup
         // ---------- Language bar ----------
         private ComboBox _cboLang;
         private Label _lblLangCaption;
+        private LinkLabel _lnkUpdate;
+        private UpdateChecker.Result _updateInfo;
 
         // ---------- Tabs ----------
         private TabControl _tabs;
@@ -82,8 +84,22 @@ namespace GBFRUltrawideSetup
             _lblLangCaption.AutoSize = true;
             _lblLangCaption.Margin = new Padding(3, 7, 3, 3);
 
+            // Update notice: hidden until the background check finds a newer release.
+            // The bar flows right-to-left, so adding it after the language caption puts
+            // it at the far left of the same row, styled as a warning.
+            _lnkUpdate = new LinkLabel();
+            _lnkUpdate.AutoSize = true;
+            _lnkUpdate.Visible = false;
+            _lnkUpdate.Margin = new Padding(3, 7, 12, 3);
+            _lnkUpdate.Font = new Font(Font, FontStyle.Bold);
+            _lnkUpdate.LinkColor = Color.Firebrick;
+            _lnkUpdate.ActiveLinkColor = Color.Red;
+            _lnkUpdate.VisitedLinkColor = Color.Firebrick;
+            _lnkUpdate.LinkClicked += OnUpdateLinkClicked;
+
             langBar.Controls.Add(_cboLang);
             langBar.Controls.Add(_lblLangCaption);
+            langBar.Controls.Add(_lnkUpdate);
 
             // --- Tabs ---
             _tabs = new TabControl();
@@ -476,6 +492,7 @@ namespace GBFRUltrawideSetup
             // Redraw dynamic status text for the current language
             RefreshStatus();
             RefreshConfigHint();
+            RefreshUpdateNotice();
 
             ResumeLayout(true);
         }
@@ -647,6 +664,60 @@ namespace GBFRUltrawideSetup
         {
             AutoDetect(false);
             RefreshStatus();
+            StartUpdateCheck();
+        }
+
+        // ==================================================================
+        //  Update check (GitHub releases)
+        // ==================================================================
+
+        private void StartUpdateCheck()
+        {
+            UpdateChecker.CheckAsync(delegate(UpdateChecker.Result result, Exception error)
+            {
+                // Runs on a thread-pool thread; marshal back onto the UI thread.
+                try
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (error != null)
+                        {
+                            Log(Strings.F("Update.CheckFailed", error.Message));
+                            return;
+                        }
+                        _updateInfo = result;
+                        RefreshUpdateNotice();
+                    });
+                }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        /// <summary>Shows/hides and (re)words the update notice; also called on language switch.</summary>
+        private void RefreshUpdateNotice()
+        {
+            if (_lnkUpdate == null) return;
+            if (_updateInfo != null && _updateInfo.UpdateAvailable)
+            {
+                _lnkUpdate.Text = Strings.F("Update.Available",
+                    _updateInfo.LatestVersion, UpdateChecker.CurrentVersion);
+                _lnkUpdate.Visible = true;
+            }
+            else
+            {
+                _lnkUpdate.Visible = false;
+            }
+        }
+
+        private void OnUpdateLinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            string url = (_updateInfo != null && !string.IsNullOrEmpty(_updateInfo.HtmlUrl))
+                ? _updateInfo.HtmlUrl
+                : UpdateChecker.ReleasesPageUrl;
+            try { Process.Start(url); }
+            catch (Exception ex) { Log(Strings.F("Update.OpenFailed", ex.Message)); }
         }
 
         private void OnTabChanged(object sender, EventArgs e)
