@@ -42,7 +42,10 @@ jobs:
             '${{ github.ref_name }}'
           }
           "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Release tag: $tag"
+          # Mark as a pre-release for 0.x versions or any tag with a pre-release suffix (e.g. -beta, -rc1).
+          $isPre = ($tag -match '^v0\.') -or ($tag -match '-')
+          "PRERELEASE=$($isPre.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Release tag: $tag (prerelease: $($isPre.ToString().ToLower()))"
 
       # 2. MSVC toolchain (windows-latest already ships VS2022, so we just use
       #    CMake's Visual Studio 17 2022 generator; no extra action is needed and
@@ -145,6 +148,7 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           generate_release_notes: true
+          prerelease: ${{ env.PRERELEASE }}
           files: |
             GBFRUltrawide-${{ env.TAG }}.zip
             GBFRUltrawideSetup-${{ env.TAG }}.zip
