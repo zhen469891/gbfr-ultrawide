@@ -155,6 +155,12 @@ Other resolution globals: swapchain size @ 0x07193038 / 0x07193040, UI cached wi
   — dist → RVA **0x07C25720**, FOV → 0x07C25724 (§3.20). Block defaults initialized at
   boot from `.rdata 0x054A4B50` = `{4.8, 0.8726646, 0.1, 0}` (writer @ RVA 0x0022D4B6).
   These data anchors are the place to restart a hunt if the preset-publish patterns die.
+  > **Correction (2026-07-10, CAMDIST_HUNT2):** this "block" is **mainView+0x3C0** — the
+  > preset-publish *tail* of the static view ctx 0x07C25360 (§2.8) — and it is **COLD**:
+  > zero rip-visible readers, constant 4.8 in every field session. It cannot carry the
+  > live camera distance; the live path is the register-base eye/at writer 0x00691F60
+  > (§2.9), shipping as CamDistCommit (§3.26). (The four rip-relative commit copies once
+  > tracked here as §3.24 proved dead and were removed.)
 
 ### 2.6 Canvas fill-width mapping @ RVA 0x0015FAB8
 
@@ -189,9 +195,16 @@ disasm-verified 2026-07-10 (all stored as floats):
 
 > **+0x59C disp32 scan mirage:** scanning `.text` for stores with `disp32 == 0x59C`
 > yields 18 hits, but they belong to a **different struct family** whose +0x59C is the
-> camera **near plane**, copied from the registry `[0x07C54830]` entry `+0xD2C` — not
-> view CBs. Only the §3.3 site (inside the producer above) writes the view CB's +0x59C;
-> don't chase the other 18 when hunting crop-factor consumers/writers.
+> camera **near plane** — not view CBs. Only the §3.3 site (inside the producer above)
+> writes the view CB's +0x59C; don't chase the other 18 when hunting crop-factor
+> consumers/writers.
+> **Correction (2026-07-10, CAMDIST_HUNT2):** earlier notes attributed the near-plane
+> source to "the registry `[0x07C54830]` entry `+0xD2C`" — wrong on both counts.
+> `[0x07C54830]` is a **generic engine singleton** (alloc size 0x63D10 @ RVA 0x000DBB33,
+> vtable 0x054BD058, 500+ xrefs, always method-call access), NOT a camera registry, and
+> the `+0xD2C/+0xD30/+0xD34` float triple actually hangs off **`[0x07C25220]`** (500+
+> xrefs, per-frame render/scene context; triple read @ RVA 0x025EF8F2). The real camera
+> registry is the view-context table in §2.8.
 
 **Scene crop factor +0x59C:** the store the **ScreenEffects** hook sits on writes the
 view CB's **+0x59C**, which in v2.0.2 is a shader-consumed **scene crop factor**: `1.0`
@@ -202,6 +215,88 @@ window width. `rax = [rcx+0x2A0]` is the view CB pointer at the hook site.
 **windowRef pair +0x594/+0x598:** hosts the dev-only WindowRefOverride experiment
 (§3.23) — theory: a shader sizes full-screen combat-flash quads as
 `renderH * (+0x594 / +0x598)`, which is 16:9 whenever the pair holds 1920/1080.
+
+### 2.8 The real camera registry: view-context table + main view ctx (CAMDIST_HUNT2, 2026-07-10)
+
+Offline hunt #2 for the live camera-distance path (full spec: `CAMDIST_HUNT2.md`, session
+scratchpad; condensed in the auto-memory `camdist-hunt-findings`). The headline: **live
+camera distance is geometric** — the length of `eye − at` on the main view context — not a
+hot scalar global. The gameplay follow camera's "cameraLength" is data-driven (Cygames
+reflection fields `cameraLength_`, `cameraLengthMax_`, `lockOnLengthBattle_`,
+`lockOnLengthChase_`, `AddCameraLength@BT`, …) and surfaces only as eye/at output.
+
+- **View-context table** @ RVA **0x054BF400** (static, 8 slots × 8 bytes), indexed by the
+  current view index `[0x07021320]`. Slot 0 = the **main view ctx, a STATIC object @ RVA
+  0x07C25360**; slots 3..7 = aux views (0x0701ED30 / 0x072D8070 / 0x0701F160 / 0x0701F550 /
+  0x0701F940, stride ≈ 0x3F0); slots 1, 2 = 0. The view-CB producer (§2.7) resolves the ctx
+  as `mov edx,[0x07021320]; lea rax,[0x054BF400]; mov r8,[rax+rdx*8]` @ 0x020D0E20..31.
+- **Main view ctx struct** (offsets proven on ctx0; static aliases for ctx0 in brackets):
+
+| ctx offset | static (ctx0) | meaning |
+| --- | --- | --- |
+| +0x10 / +0x20 / +0x30 | 0x07C25370 / 80 / 90 | **committed EYE / LOOK-AT / up** (vec4) — the pair the view-CB producer reads every frame |
+| +0x44 | 0x07C253A4 | float → CB +0x588 (near-plane candidate) |
+| +0x60 | 0x07C253C0 | ptr → camera object (+0x9D0 aspect, +0x9D4 FOV — the §2.5 struct) |
+| +0xD0 / +0xD8 / +0xE0 | 0x07C25430 / 38 / 40 | **behavior handle idx / object ptr / generation** (validated vs handle table `[0x070214E8]`) |
+| +0x100 / +0x110 / +0x120 | 0x07C25460 / 70 / 80 | stage-1 eye/at/up — written by the active behavior's virtual `+0x2C8` |
+| +0x140 / +0x150 | 0x07C254A0 / B0 | previous-frame committed eye/at (commit feedback) |
+| +0x160.. +0x178 | 0x07C254C0.. | manual/free-cam override block (written with flag +0x3B1=1 @ 0x0201B5xx) |
+| +0x310 / +0x320 / +0x330 | **0x07C25670 / 80 / 90** | **STAGED eye/at/up** — the last stop before commit |
+| +0x3B1 | 0x07C25711 | byte flag "manual camera active" (photo/debug cam) |
+| +0x3B3 | 0x07C25713 | byte flag set when eye/at recommitted from ctx (0x028D526D) |
+| +0x3C0 / +0x3C4 | **0x07C25720 / 24** | preset publish tail (dist 4.8 / FOV 0.8726646) — **COLD**, zero rip-visible readers (the §3.20 target and the retired DIAG-CAMDIST stream) |
+
+- **Commit routine** (four inlined copies — the presumed per-frame choke point at hunt-2
+  time; §3.24): copies staged eye/at → committed and calls `0x007513C0(ctx)` after each
+  store to rebuild the view. RVAs 0x01A2D8F3 / 0x01F4185F / 0x01FF3AAC / 0x0320150C.
+  > **Correction (CAMDIST_HUNT3, 2026-07-11):** these four are **dead** (0 fires in the
+  > field) — relocation-only staging copies, NOT the live path. The live per-frame writer
+  > is the register-base function 0x00691F60 (§2.9), shipping as §3.26; §3.24 was removed.
+- **Camera-behavior struct family** (`[ctx+0xD8]`; RTTI subclasses `CameraPhotoMode`,
+  `CameraBattleCutscene`, `RouteFollowCamera@cy`, …): +0x40 type id, +0x1388 msg id,
+  **+0x1398 distance (cm**, 300/800 clamps**)**, +0x139C secondary distance, +0x13A0 pitch
+  (rad), +0x13A8 yaw (rad). Exhaustive writer scan: the ONLY dynamic scalar writer of
+  +0x1398 is the id-6 message consumer @ **0x00A840E5** (v1's path; §3.25 counts its
+  liveness) plus hardcoded `1000.0` scripted setters (12 `vbroadcastss [obj+0x1398]`
+  position computes) — multiplying +0x1398 writers can NOT be the general fix.
+- **Registry corrections vs earlier notes:** `[0x07C54830]` is a generic engine singleton,
+  not the camera registry, and the `+0xD2C` triple belongs to `[0x07C25220]` (§2.7 note).
+
+### 2.9 The LIVE register-base eye/at writer: CamDistCommit 0x00691F60 (CAMDIST_HUNT3, 2026-07-11)
+
+Offline hunt #3 (full spec: `CAMDIST_HUNT3.md`, session scratchpad; auto-memory
+`camdist-hunt-findings`). **This is the writer the first five disp32-xref hunts all
+missed**, because it writes eye/at *register-relative* (`[rsi+0x10]` / `[rsi+0x20]`, rsi=ctx),
+which no rip-relative cross-reference can see. It supersedes the §3.24 four-site commit
+family (those are rip-relative COMMIT copies that field-testing proved **never fire** in
+v2.0.2 gameplay — see §3.24 correction).
+
+- **Writer function** @ RVA **0x00691F60** (`push rsi; push rbx; sub rsp,0x88; vmovaps
+  [rsp+0x70],xmm6`). Entry gate `cmp byte [rcx+0xC0],0; jnz 0x0069255B` skips the whole
+  body when a mode byte is set. `mov rsi,rcx` @ 0x00691F7C — **rsi = ctx for the whole body**.
+- **The commit basic block** (eye/at both live in xmm0/xmm1; disasm-verified):
+
+  ```
+  0x00692487  C5 F8 58 8E 10 01 00 00   vaddps  xmm1, xmm0, [rsi+0x110]   ; at  = pivot + at-offset
+  0x0069248F  C5 F8 58 86 00 01 00 00   vaddps  xmm0, xmm0, [rsi+0x100]   ; eye = pivot + eye-offset
+  0x00692497  C5 F8 29 46 10            vmovaps [rsi+0x10], xmm0          ; COMMIT EYE  (ctx+0x10)  <- HOOK
+  0x0069249C  C5 F8 29 4E 20            vmovaps [rsi+0x20], xmm1          ; COMMIT AT   (ctx+0x20)
+  0x006924A1  C5 F8 28 86 20 01 00 00   vmovaps xmm0, [rsi+0x120]
+  0x006924A9  C5 F8 29 46 30            vmovaps [rsi+0x30], xmm0          ; commit up (ctx+0x30)
+  0x006924AE  48 89 F1                  mov rcx, rsi
+  0x006924B1  E8 0A EF 0B 00            call 0x007513C0                   ; rebuild view matrix
+  ```
+
+- **Per-frame + main-view proven statically:** called 10× per frame from the fixed dispatch
+  loop in fn 0x00231A00 @ 0x00231CB9..0x00231D2C, each `lea rcx,[ctx]; call 0x00691F60`. Call
+  **#0 = `lea rcx,[0x07C25360]` = ctx0 main view** (rip-relative → definitely main); #1..#9 =
+  aux views. Frame path 0x00153E10 → 0x00154A10 → 0x00231A00 (delta-time gated).
+- **Hook target for the multiply (Form A, NOW WIRED and shipping):** mid-hook at the eye store
+  **0x00692497**, guard `rsi == 0x07C25360`, `xmm0.xyz = xmm1 + (xmm0 − xmm1) × m` (keep w);
+  installed only at m != 1.0. Commits once per view per frame → no idempotency guard needed.
+  Verified 2026-07-11 (in-game FIRED, confidence HIGH) — see §3.26 and ADR-0013.
+- **Statics:** ctx0 = 0x07C25360, live eye = 0x07C25370 (ctx+0x10), live at = 0x07C25380
+  (ctx+0x20) — the same statics §2.8 lists, now with their live WRITER identified.
 
 ---
 
@@ -451,6 +546,15 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 
 ### 3.20 CamDistPreset (`AspectFOVFix`, NEW 2026-07-10)
 
+> **Status update (2026-07-10, CAMDIST_HUNT2):** the publish target 0x07C25720 is
+> **mainView+0x3C0 — a cold preset tail with zero rip-visible readers** (§2.8), and none
+> of the three CamDist* families ever FIRED in the field. This family cannot affect the
+> live distance; it is kept installed under the same gate purely as an early-warning
+> canary (a FIRED line would mean a future patch revived the path — then check for
+> double-scaling against the shipping hook). The live path turned out to be the
+> register-base writer 0x00691F60 (§2.9), now shipping as **CamDistCommit (§3.26)**;
+> the once-RANK-1 §3.24 commit sites proved dead and were removed.
+
 - **Feature:** camera distance multiplier (`[Gameplay Camera Distance] Multiplier`) — primary family, replacing the dead GameplayCamera site (§3.6). Scales the preset distance at the moment it is published to the global camera-params block. Design cross-derived from community ultrawide research for this build, re-verified offline.
 - **Pattern:** `C5 FA 10 41 14 C5 FA 11 05 ?? ?? ?? ?? C5 F8 28 41 30 C5 F8` — `vmovss xmm0,[rcx+0x14]` (rcx = active preset, +0x14 = distance in meters, default 4.8) + `vmovss [rip→0x07C25720],xmm0` (publish) + the start of the rest of the block copy.
 - **Hits / RVA:** **4 hits** (verified offline) @ RVA **0x0095A91F / 0x01F9245F / 0x0268DA8F / 0x02DB617F** — four inlined copies of "apply active camera preset" (each iterates a preset list, picks the active entry via flag bytes +0x74/+0x69, then publishes). All four store to the **same** global 0x07C25720 (§2.5). **Hook ALL FOUR** (like GfxCorruption): which copy runs depends on game mode; over-hooking is harmless since each publish is scaled exactly once.
@@ -491,6 +595,52 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Gating / diagnostics:** the pattern is scanned in **every dev build** regardless of the ini key — the `HIT: WindowRefOverride site` line is a pattern-survival canary. The install log also dumps both resolved globals **and their current int values** (post-injection-delay evidence of ResPublish state). The hook installs only when `[Debug - Scene] WindowRefOverride = true` (in `GBFRUltrawide.dev.ini`) AND aspect > 16:9. One-shot `FIRED: WindowRefOverride (CB windowRef W in: <incoming> -> <new>; windowRefH global: <H>)`.
 - **How to read the result:** incoming **1920** → producer sees pre-patch values, theory alive (and if the bars vanish with the override on, the consumer is found); incoming **3440** → the pair was already screen-sized, this theory is dead regardless of visuals. Run with `CropFactorOverride = -1` so the two instruments don't confound.
 - **Confidence:** site/boundary HIGH (offline-verified unique hit + instruction lengths); theory MEDIUM (that is what the experiment is for).
+
+### 3.24 CamCommitDist (4-site rip-relative commit) — REMOVED 2026-07-11 (dead, superseded by CamDistCommit §3.26)
+
+> **Status: REMOVED (dead site).** These four rip-relative COMMIT copies were the RANK-1
+> live-path candidate from offline hunt #2 (CAMDIST_HUNT2, 2026-07-10; §2.8), but were
+> **field-proven DEAD** — every DIAG-CAM2 session counted **0 fires** on all four sites across
+> full gameplay + cutscenes. They are relocation-only staging copies (cutscene/replay staging
+> paths) that do not run in v2.0.2 live play. The **live** per-frame eye/at writer is the
+> *register-base* function **0x00691F60** (§2.9), which stores eye/at as `[rsi+0x10]`/`[rsi+0x20]`
+> (rsi=ctx) — invisible to disp32 xrefs, which is why five prior hunts missed it. **The hook
+> has been REMOVED from `src/dllmain.cpp` entirely** — it would double-multiply if it ever
+> revived. No code hooks these sites anymore; the shipping multiplier lives at **§3.26**.
+> Everything below is retained as **historical reference** for the next game-version port.
+
+- **Feature (historical):** camera distance multiplier at the per-frame commit choke point. The theory: scale the committed eye about the look-at at the commit that every camera mode's output was thought to pass through. Disproven in the field — the real live writer is register-base (§2.9/§3.26).
+- **Pattern (historical):** `48 8D ?? ?? ?? ?? ?? C5 F8 28 05 ?? ?? ?? ?? C5 F8 29 05 ?? ?? ?? ?? 48 89 ?? E8 ?? ?? ?? ?? C5 F8 28 05`
+- **Hits / RVA (historical):** **exactly 4 hits** (offline-verified 2026-07-10) @ RVA **0x01A2D8F3 / 0x01F4185F / 0x01FF3AAC / 0x0320150C** — four inlined commit copies in four game-mode drivers; the removed hook was at **+0xF** (the 8-byte `vmovaps [rip→0x07C25370],xmm0` committed-eye store). Site layout: +0x00 `lea r?,[rip→0x07C25360]` (ctx0), +0x07 `vmovaps xmm0,[rip→0x07C25670]` (staged eye), **+0x0F committed-eye store (the old hook)**, +0x17 `mov rcx,r?`, +0x1A `call 0x007513C0`, +0x1F staged-at load (0x07C25680).
+- **Why they were relocation-only staging copies:** each copy reads from and writes to the ctx0 *statics* by rip-relative disp32 (staged eye 0x07C25670 → committed eye 0x07C25370, etc.), the shape a relocation/staging path takes. Live gameplay instead drives the per-frame writer 0x00691F60 register-relative off `rsi=ctx`, so these disp32 copies never executed in play (0 fires every DIAG-CAM2 session).
+- **ctx-layout sanity gate (historical):** when the (now-removed) hook installed, all four rip targets were resolved from each site's own disp32 fields and required `stagedEye == ctx0+0x310 && committedEye == ctx0+0x10 && stagedAt == stagedEye+0x10`, all sites agreeing on the staged look-at; a site failing the gate was skipped. This is the structural check to reuse if the register-base site (§3.26) ever needs re-anchoring against the statics.
+- **Alternatives ruled out at the time (CAMDIST_HUNT2 §4, still valid):** RANK-2 MsgCamDist (consumer @ 0x00A840D7) — the id-6 message path proved dead too (§3.25 stream D); memory-multiplying behavior `+0x1398` (only writer is the consumer — FOV-lesson compounding, §2.5/ADR-0011); CB-producer displacement (desyncs rendering vs culling); preset-publish scaling (§3.20 — cold).
+- **Lesson:** a register-base `[reg+disp]` writer is invisible to rip-relative `xref`; when a per-frame-changing static has no rip-visible writer, hunt via the dispatch loop / rebuild caller instead of `xref` on the static (ADR-0013). The active shipping hook is **CamDistCommit (§3.26)**.
+
+### 3.25 DIAG-CAM2 (`[Debug - Camera] CamDiag` in `GBFRUltrawide.dev.ini`, DEV-ONLY OBSERVATION, NEW 2026-07-10)
+
+- **Purpose:** observation instrumentation for the camera-distance hunt (CAMDIST_HUNT2/HUNT3) — produced the data that identified and validated the live writer now shipping as §3.26. **Not a shipping feature** (dev builds only, ADR-0010). Nothing is modified; all output is log-on-change with prefix `DIAG-CAM2:` and a shared 128-line budget.
+- **Streams** (watchdog `DiagCam2Watchdog`, 1 s sampling on the Main thread; counters every 5 s):
+  - **A — distances:** committed |eye−at| (statics 0x07C25370/0x07C25380) and staged |eye−at| (0x07C25670/0x07C25680), with running min/max. Units confirmed **meters** (§3.26: zoom tracked 0.679–6.566 m).
+  - **C — behavior object:** `[0x07C25438]` → type id (+0x40), distance family +0x1398/+0x139C (guarded heap reads, bitwise change compare). Sampled for reference — CAMDIST_HUNT2 showed +0x1398 does NOT drive the live path.
+  - **D — message liveness:** counting hook at the id-6 camera-message consumer, pattern `8B 46 18 89 87 88 13 00 00 C5 FA 10 46 1C C5 FA 11 87 98 13 00 00`, **unique @ RVA 0x00A840D7** (re-verified offline 2026-07-10), hook at **+0x0** (3-byte `mov eax,[rsi+0x18]`, count + last dist only, message never modified). Proved the id-6 message path dead (0 fires) — MsgCamDist ruled out.
+  - **E — mode flags:** bytes `[0x07C25711]` (manual/photo cam) / `[0x07C25713]` (recommit) to label samples by camera mode.
+  - **F — live-writer counters:** `fires_ctx0` / `fires_other` / `gateskip` / `|eye−at|` for the live register-base writer 0x00691F60, fed by the **shipping** 0x00692497 mid-hook itself (counting when `CamDiag` is set — §3.26) plus a dev-only entry counter on 0x00691F60 (`entries_ctx0`, so `gateskip = entries_ctx0 − fires_ctx0`). Report line `DIAG-CAM2: camcommit fires_ctx0=N fires_other=N gateskip=N (entries_ctx0=N) |eye-at|=min..max`. This replaces the old stream B (the four dead rip-relative commit counters, removed with the §3.24 hook).
+- **Retired predecessor:** DIAG-CAMDIST (preset global 0x07C25720 + camera-object aspect/FOV streams) — the preset global is explained (cold ctx+0x3C0 tail, §2.8) and the FOV question was concluded by ADR-0011.
+- **Statics are v2.0.2-pinned RVAs** (module timestamp 1782470458), same convention as `DiagDump`; re-derive from §2.8 after a game update.
+
+### 3.26 CamDistCommit — the shipping camera distance multiplier (`CamDistCommit`, ACTIVE 2026-07-11)
+
+- **Feature:** camera distance multiplier (`[Gameplay Camera Distance] Multiplier` → global `fCamDistMulti`) — **the active shipping hook** in both build flavors, wired into the §2.9 live register-base writer 0x00691F60. Supersedes the dead four-site CamCommitDist family (§3.24, now removed). Provenance "offline hunt + in-game FIRED verification 2026-07-11"; see ADR-0013.
+- **Pattern:** `C5 F8 29 46 10 C5 F8 29 4E 20 C5 F8 28 86 20 01 00 00 C5 F8 29 46 30` — offline-verified UNIQUE (`scan` = exactly 1 hit) @ **RVA 0x00692497** (fo 0x00691897), hook offset **+0x0**. The pattern STARTS on the 5-byte `vmovaps [rsi+0x10],xmm0` committed-eye store (a clean VEX boundary); the following `vmovaps [rsi+0x20],xmm1` gives 10 relocatable bytes (> the 5 a rel32 detour needs; verified no code jumps into the range). At the hook: `rsi`=ctx, `xmm0`=eye (vec4), `xmm1`=at (vec4).
+- **Hook semantics (Form A, register-only):** guard `rsi == baseModule+0x07C25360` (ctx0 — the static **main-view ctx only**; the 9 aux views are left untouched). When it matches, `xmm0.xyz = xmm1.xyz + (xmm0.xyz − xmm1.xyz) × fCamDistMulti`, preserving xmm0 lane 3 (w) — the committed eye is dollied about the look-at. **No memory is written** (per the ADR-0011 lesson: the committed eye is republished every frame, so a memory multiply would be overwritten or compound). Installed only when `fCamDistMulti != 1.0` (or, in dev builds, counting-only mode when `[Debug - Camera] CamDiag = true`). One commit per view per frame → **no idempotency guard needed**.
+- **Gameplay-only by gate:** the writer function's entry gate `cmp byte [rcx+0xC0],0; jnz …` closes during cutscenes/dialogue, so the eye store is never reached then — this multiplier does **NOT** affect scripted cutscene/dialogue framing. Contrast **ProjMatrixFOV** (§3.19/ADR-0011), which sits at the projection-matrix builder *downstream* of any such gate and therefore DOES affect cutscenes. This gate-based gameplay-only scope is the key architectural distinction (deliberate, desirable).
+- **Known limitation:** camera wall-collision is computed UPSTREAM of this commit, so a multiplier > 1 can clip/push the eye into walls near geometry (documented, not fixed — the same property v1's hook had).
+- **Verification recorded (2026-07-11, in-game FIRED, confidence HIGH):** at 120 fps `fires_ctx0` fired every gameplay frame; `fires_other ≈ 9× fires_ctx0` (the 9 aux views, confirming the dispatch loop); `|eye−at|` tracked zoom over **0.679–6.566 m** (units confirmed meters); the `[rcx+0xC0]` gate closed ONLY in cutscenes/dialogue (gameplay-only proven).
+- **FIRED lines:** shipping one-shot `FIRED: CamDistCommit (main view) - |eye-at| <before> -> <after> (x<m>, eye dollied about look-at)`; dev counting one-shot `FIRED: CamDistCommit counting ctx0 (main view) - |eye-at|=<d> (pre-multiply sample)`.
+- **Dev-build DIAG-CAM2 (stream F):** in dev builds the **same single** `SafetyHookMid` on 0x00692497 also does the stream-F counting when `CamDiag` is set (splits `fires_ctx0` (rsi==0x07C25360) vs `fires_other`, computes ctx0 `|eye−at|` from the live xmm0/xmm1, min/max tracked). A **separate dev-only entry counter** on 0x00691F60 (`push rsi` function entry, `rcx`=ctx before the `[rcx+0xC0]` gate) counts `entries_ctx0`, so `gateskip = entries_ctx0 − fires_ctx0` measures gate closure. Report line: `DIAG-CAM2: camcommit fires_ctx0=N fires_other=N gateskip=N (entries_ctx0=N) |eye-at|=min..max`. (There is exactly ONE mid-hook on 0x00692497 — shipping multiply and dev counting share it.)
+- **ctx0 resolution:** `g_pCamCtx0 = baseModule + 0x07C25360` at install (the static main-view ctx from §2.8/§2.9); only compared against `rsi`/`rcx`, never dereferenced.
+- **Confidence:** **HIGH** (both patterns offline-verified unique on the deployed v2.0.2 exe, timestamp 1782470458; per-frame main-view liveness and the gameplay-only gate FIRED-verified in-game 2026-07-11). See ADR-0013.
 
 ---
 

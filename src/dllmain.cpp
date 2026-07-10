@@ -88,6 +88,41 @@
 //                                                track (unique hit, +0x23, xmm8, normalized 0..1), free-roam
 //                                                config copy (unique hit, +0x5, xmm0). Derived from community
 //                                                ultrawide research for this exe build, re-verified offline.
+//                                                STATUS UPDATE (offline hunt 2026-07-10, CAMDIST_HUNT2): none
+//                                                of the three ever FIRED in the field, and the CamDistPreset
+//                                                publish target 0x07C25720 is mainView+0x3C0 - a COLD preset
+//                                                tail with zero rip-visible readers. Kept for lineage; the
+//                                                live-path is CamDistCommit below.
+//   [SHIPPING 2026-07-11] CamDistCommit (CamDistCommit) - THE camera-distance multiplier ([Gameplay Camera
+//                                                Distance] Multiplier), both build flavors (ADR-0013;
+//                                                PATTERNS.md 2.9/3.24/3.26). Mid-hook at the register-base
+//                                                per-frame committed-eye store RVA 0x00692497 (inside writer
+//                                                function 0x00691F60), hook +0x0. rsi=ctx, xmm0=eye, xmm1=at.
+//                                                Form A: guard rsi == baseModule+0x07C25360 (MAIN VIEW ONLY;
+//                                                9 aux views untouched), then xmm0.xyz = xmm1 + (xmm0-xmm1)*m
+//                                                (w kept). Register-only, no memory writes; installed only
+//                                                when m != 1.0 (zero overhead at 1.0). One commit per view
+//                                                per frame -> no idempotency guard. GAMEPLAY-ONLY BY GATE:
+//                                                the writer's entry gate [rcx+0xC0] closes in cutscenes/
+//                                                dialogue, so this does NOT touch scripted framing (unlike
+//                                                ProjMatrixFOV/ADR-0011, which does affect cutscenes). Known
+//                                                limitation: wall-collision is computed upstream, so m > 1
+//                                                can clip the eye into walls. Confidence HIGH (offline hunt +
+//                                                in-game FIRED verification 2026-07-11). SUPERSEDES the old
+//                                                rip-relative 4-site "CamCommitDist" (0x01A2D8F3 / 0x01F4185F
+//                                                / 0x01FF3AAC / 0x0320150C), which was field-proven DEAD
+//                                                (0 fires) and has been REMOVED (docs/PATTERNS.md 3.24 note).
+//   [DEV 2026-07-10] DIAG-CAM2  ([Debug - Camera] CamDiag, dev builds only) - observation instrumentation
+//                                                for the camera-distance work: watchdog sampling committed/
+//                                                staged |eye-at| off the view-ctx statics; the LIVE commit
+//                                                counters (fires_ctx0/fires_other/gateskip/|eye-at|, stream F)
+//                                                come from the shipping CamDistCommit eye-store hook itself
+//                                                (same 0x00692497 mid-hook, counting when CamDiag) plus a
+//                                                dev-only entry counter on 0x00691F60; behavior object
+//                                                [0x07C25438] type/+0x1398 sampling, id-6 camera-message
+//                                                consumer counter (RVA 0x00A840D7, count only), and mode flag
+//                                                bytes 0x07C25711/13. Replaces the retired DIAG-CAMDIST
+//                                                watchdog (0x07C25720 is the cold ctx+0x3C0 preset tail).
 //   [NEW 2026-07-10] Nameplate    (NameplateFix) - world-anchored nameplate horizontal scale (expected RVA
 //                                                0x00847F6B, hook at pattern+0x3C right after "vdivss
 //                                                xmm1,xmm7,[rax+0x9D0]"): xmm1 = xmm7 / live fAspectRatio.
@@ -104,9 +139,11 @@
 //
 // MISS on v2.0.2: none - all v1 patterns relocated or replaced (GameplayCamera deleted as a dead
 // site), plus the v2-native patterns ViewParamsFOV, ProjMatrixFOV, Nameplate, CamDistPreset,
-// FollowCamDist and RoamCamDist. The gameplay FOV multiplier is served by ProjMatrixFOV (with
-// ViewParamsFOV keeping culling consistent); the camera distance multiplier by the three CamDist*
-// families; only the <16:9 vert- FOV compensation remains unported.
+// FollowCamDist, RoamCamDist and CamDistCommit. The gameplay FOV multiplier is served by
+// ProjMatrixFOV (with ViewParamsFOV keeping culling consistent); the camera distance multiplier
+// by CamDistCommit (the register-base committed-eye writer; the three older CamDist* families
+// never fired in the field, and the old rip-relative 4-site CamCommitDist was removed as dead);
+// only the <16:9 vert- FOV compensation remains unported.
 // =====================================
 
 #include "stdafx.h"
@@ -187,12 +224,53 @@ int iEdgeSnapCount = 0;
 uint32_t uMoveIds[kMaxMoveEntries];
 float fMoveDeltas[kMaxMoveEntries];
 int iMoveIdCount = 0;
-// DIAG-CAMDIST instrumentation (dev builds only): most recent camera/view-params
-// object pointer seen by the AspectRatio / ProjMatrixAspect hooks (the struct with
-// +0x9D0 aspect / +0x9D4 FOV). Sampled every ~2s by DiagCamDistWatchdog (bottom of
-// this file); relaxed atomic - the watchdog only wants "a recent camera", not a
-// synchronized snapshot.
-std::atomic<uintptr_t> g_DiagCamObj{ 0 };
+// [Debug - Camera] CamDiag (dev builds only): arms the DIAG-CAM2 camera-distance
+// observation instrumentation (PATTERNS.md 3.25/3.26): the DiagCam2Watchdog (bottom of
+// this file), the DIAG counting inside the shipping CamDistCommit eye-store hook
+// (stream F: fires_ctx0/fires_other/gateskip/|eye-at|), plus the dev-only entry-counter
+// and id-6 camera-message consumer counters. When CamDiag is on and the multiplier is
+// 1.0, the eye-store hook installs in counting-only mode (eye untouched).
+bool bCamDiag = false;
+// DIAG-CAM2 stream D: id-6 camera-message consumer counter (RVA 0x00A840D7 - the
+// consumer that stores the v1-style message payload to behavior +0x1388/+0x1398/
+// +0x13A0/+0x13A8). Count + last seen distance only; the message is NEVER modified.
+// Decides whether the RANK-2 MsgCamDist candidate (PATTERNS.md 3.25) is eligible.
+std::atomic<uint32_t> g_MsgCam6Count{ 0 };
+std::atomic<uint32_t> g_MsgCam6LastDistBits{ 0 };
+#endif // GBFR_DEVBUILD
+
+// CamDistCommit (CAMDIST_HUNT3, PATTERNS.md 2.9/3.24, ADR-0013) - the SHIPPING camera
+// distance multiplier. Its single mid-hook lives at the register-base per-frame eye/at
+// committer 0x00691F60's eye store 0x00692497, which every prior disp32-xref hunt missed.
+// The static main-view ctx pointer (base + 0x07C25360) is resolved at install time and
+// only COMPARED against rsi (guarding the main view), never dereferenced through the hook.
+// Used in BOTH build flavors: the multiply guards on rsi==g_pCamCtx0.
+const uint8_t* g_pCamCtx0 = nullptr;                 // static main-view ctx (rsi==this => main view)
+std::atomic<bool> g_CamDistFiredLog{ false };        // one-shot FIRED marker for the multiply
+
+#ifdef GBFR_DEVBUILD
+// CamDistCommit VERIFICATION counters (dev builds only, armed by [Debug - Camera]
+// CamDiag). This is the DIAG counting half of the single 0x00692497 mid-hook - the same
+// hook that multiplies in release does the counting too when CamDiag is set (see the
+// one reconciled hook body in CamDistCommit(); PATTERNS.md 3.26 / stream F). Two
+// read-only counting inputs feed these:
+//   1) eye-store site 0x00692497 (in the shared hook body): counts calls that REACHED
+//      the commit stores, split by ctx (rsi==ctx0 -> main view). For the ctx0 case it
+//      also measures |eye-at| straight out of the live xmm0 (eye) / xmm1 (at) registers.
+//      In dev+CamDiag the |eye-at| is sampled BEFORE the multiply is applied.
+//   2) function entry 0x00691F60 (a SECOND dev-only read-only hook): counts total ctx0
+//      ENTRIES before the internal [rcx+0xC0] gate. gate-skips = entries_ctx0 -
+//      fires_ctx0 (a skipped call never reaches the eye store, so it is invisible to the
+//      eye-store hook alone). This entry hook exists ONLY in dev builds.
+std::atomic<uint32_t> g_CamCommitFiresCtx0{ 0 };     // eye-store reached with rsi==ctx0
+std::atomic<uint32_t> g_CamCommitFiresOther{ 0 };    // eye-store reached with rsi!=ctx0
+std::atomic<uint32_t> g_CamCommitEntriesCtx0{ 0 };   // fn entry reached with rcx==ctx0 (pre-gate)
+// |eye-at| min/max over ctx0 fires, stored as raw bits so an unwritten "no data yet"
+// state is distinguishable and no float is torn across the atomic load.
+std::atomic<uint32_t> g_CamCommitDistMinBits{ 0 };
+std::atomic<uint32_t> g_CamCommitDistMaxBits{ 0 };
+std::atomic<bool>     g_CamCommitHaveDist{ false };
+std::atomic<bool>     g_CamCommitCountLog{ false };  // one-shot "counting reached ctx0" marker
 #endif // GBFR_DEVBUILD
 bool bAspectFix;
 bool bFOVFix;
@@ -316,7 +394,7 @@ void Logging()
         LogInfo("----------");
 #ifdef GBFR_DEVBUILD
         LogInfo("%s v%s loaded. (dev)", sFixName.c_str(), sFixVer.c_str());
-        LogInfo("Development build: [Debug - Span HUD] (Probe / EdgeSnapIds / MoveIds), [Debug - Backgrounds] (Probe) and [Debug - Scene] (CropFactorOverride / WindowRefOverride) sections are active, read from scripts\\GBFRUltrawide.dev.ini.");
+        LogInfo("Development build: [Debug - Span HUD] (Probe / EdgeSnapIds / MoveIds), [Debug - Backgrounds] (Probe), [Debug - Scene] (CropFactorOverride / WindowRefOverride) and [Debug - Camera] (CamDiag) sections are active, read from scripts\\GBFRUltrawide.dev.ini.");
 #else
         LogInfo("%s v%s loaded.", sFixName.c_str(), sFixVer.c_str());
 #endif
@@ -404,6 +482,7 @@ void ReadConfig()
     inipp::get_value(devIni.sections["Debug - Backgrounds"], "Probe", bBackgroundProbe);
     inipp::get_value(devIni.sections["Debug - Scene"], "CropFactorOverride", fCropFactorOverride);
     inipp::get_value(devIni.sections["Debug - Scene"], "WindowRefOverride", bWindowRefOverride);
+    inipp::get_value(devIni.sections["Debug - Camera"], "CamDiag", bCamDiag);
     std::string sEdgeSnapIds;
     std::string sMoveIds;
     inipp::get_value(devIni.sections["Debug - Span HUD"], "EdgeSnapIds", sEdgeSnapIds);
@@ -449,6 +528,9 @@ void ReadConfig()
     LogInfo("Config Parse: bWindowRefOverride: %s", bWindowRefOverride ? "true" : "false");
     if (bWindowRefOverride)
         LogInfo("Config Parse: [Debug - Scene] WindowRefOverride ACTIVE: view CB +0x594 (windowRef W) will be forced to windowRefH * aspect at >16:9 - flash-bars experiment #2; the first FIRED line prints the incoming value");
+    LogInfo("Config Parse: bCamDiag: %s", bCamDiag ? "true" : "false");
+    if (bCamDiag)
+        LogInfo("Config Parse: [Debug - Camera] CamDiag ACTIVE: DIAG-CAM2 observation on - commit-site counters, |eye-at| watchdog, behavior/message/flag sampling (log-on-change, prefix DIAG-CAM2:, budget 128 lines)");
 
     // EdgeSnapIds = 123,456 - comma-separated element ids. Any non-digit run acts as
     // a separator; entries beyond the fixed capacity are dropped with a warning.
@@ -1107,10 +1189,6 @@ void AspectFOVFix()
                 static std::atomic<bool> logged{ false };
                 if (!logged.exchange(true)) LogInfo("FIRED: AspectRatio");
 
-#ifdef GBFR_DEVBUILD
-                // rax = camera/view-params object - cache it for DiagCamDistWatchdog.
-                g_DiagCamObj.store(ctx.rax, std::memory_order_relaxed);
-#endif // GBFR_DEVBUILD
                 *reinterpret_cast<float*>(ctx.rax + 0x9D0) = fAspectRatio;
             });
     }
@@ -1124,11 +1202,6 @@ void AspectFOVFix()
                 static std::atomic<bool> logged{ false };
                 if (!logged.exchange(true)) LogInfo("FIRED: ProjMatrixAspect");
 
-#ifdef GBFR_DEVBUILD
-                // r14 = camera object in the projection-matrix builder - cache it
-                // for DiagCamDistWatchdog.
-                g_DiagCamObj.store(ctx.r14, std::memory_order_relaxed);
-#endif // GBFR_DEVBUILD
                 ctx.xmm8.f32[0] = fAspectRatio;
             });
     }
@@ -1180,6 +1253,18 @@ void AspectFOVFix()
     // instruction-by-instruction (docs/PATTERNS.md 3.20-3.22). The three sites do not
     // overlap each other (or anything else we hook), so plain scan+install per family
     // is safe here - no ordering constraint like the aspect/FOV block above.
+    //
+    // STATUS UPDATE (offline hunt 2026-07-10, CAMDIST_HUNT2 / PATTERNS.md 2.8): none
+    // of the three ever FIRED in the field, and the CamDistPreset publish target
+    // 0x07C25720 is mainView+0x3C0 - the static view ctx's COLD preset tail (zero
+    // rip-visible readers; the DIAG-CAMDIST watchdog saw a constant 4.8 all session).
+    // The live distance is GEOMETRIC (|eye-at| of the commit statics), served by the
+    // shipping CamDistCommit hook (register-base committed-eye writer 0x00692497; see
+    // CamDistCommit() below and ADR-0013). The trio is KEPT installed under the same
+    // gate purely as an early-warning canary: it never fires today, so it cannot
+    // double-scale against CamDistCommit; if a future patch revives one of these paths
+    // its one-shot FIRED line is the earliest possible warning that the distance could
+    // be scaled twice (in which case gate one of the families off).
     if (fCamDistMulti != (float)1)
     {
         // F1 - CamDistPreset (primary effect): the four inlined "apply active camera
@@ -1311,6 +1396,231 @@ void AspectFOVFix()
             LogError("MISS: CutsceneFOV pattern not found - feature disabled");
         }
     }
+}
+
+// =====================================================================================
+// CamDistCommit - the SHIPPING camera distance multiplier ([Gameplay Camera Distance]
+// Multiplier). Both build flavors, NOT dev-gated. Provenance: offline hunt CAMDIST_HUNT3
+// + in-game FIRED verification 2026-07-11 (docs/PATTERNS.md 2.9/3.24/3.26, ADR-0013).
+// Confidence: HIGH.
+//
+// Hook site: the committed-eye store at RVA 0x00692497, inside the register-base
+// per-frame eye/at committer function 0x00691F60. This is the writer that the first five
+// disp32-xref hunts all missed - it writes eye/at register-relative ([rsi+0x10]/[rsi+0x20],
+// rsi=ctx), which no rip-relative cross-reference can see. The old rip-relative 4-site
+// "CamCommitDist" (0x01A2D8F3 / 0x01F4185F / 0x01FF3AAC / 0x0320150C) it superseded was
+// field-proven DEAD (0 fires every DIAG-CAM2 session) and has been REMOVED - see the
+// historical note in docs/PATTERNS.md 3.24.
+//
+// The writer body computes eye/at, then commits (disasm-verified on the deployed exe):
+//   0x00692487  vaddps  xmm1, xmm0, [rsi+0x110]   ; at  (live in xmm1)
+//   0x0069248F  vaddps  xmm0, xmm0, [rsi+0x100]   ; eye (live in xmm0)
+//   0x00692497  vmovaps [rsi+0x10], xmm0          ; *** COMMIT EYE ***   <== HOOK (+0x0)
+//   0x0069249C  vmovaps [rsi+0x20], xmm1          ; *** COMMIT AT  ***
+//   0x006924A1  vmovaps xmm0, [rsi+0x120]         ; up load
+//   0x006924A9  vmovaps [rsi+0x30], xmm0          ; commit up
+//   0x006924AE  mov rcx, rsi
+//   0x006924B1  call 0x007513C0                   ; rebuild view matrix
+// Called 10x/frame from the fixed dispatch loop in 0x00231A00; call #0 =
+// "lea rcx,[0x07C25360]; call 0x00691F60" -> ctx0 = the static main view.
+//
+// EYE-STORE pattern (offline-verified UNIQUE, scan=1 @ RVA 0x00692497):
+//   C5 F8 29 46 10  C5 F8 29 4E 20  C5 F8 28 86 20 01 00 00  C5 F8 29 46 30
+//   i.e. vmovaps[rsi+0x10] , vmovaps[rsi+0x20] , vmovaps xmm0,[rsi+0x120] , vmovaps[rsi+0x30]
+// The pattern STARTS at the eye store, so the hook offset is +0x0 - a clean 5-byte VEX
+// instruction boundary (safetyhook has the eye store + the following at store = 10
+// relocatable bytes, > the 5 a rel32 detour needs; verified no code jumps into the range).
+// At the hook: rsi = ctx, xmm0 = eye (about to be stored), xmm1 = at.
+//
+// Semantics (Form A, register-only, no memory writes): when rsi == g_pCamCtx0 (main view
+// ONLY - the 9 aux views are left untouched), scale the eye about the look-at:
+//     xmm0.xyz = xmm1.xyz + (xmm0.xyz - xmm1.xyz) * fCamDistMulti     (xmm0 lane 3 = w kept)
+// The committer runs once per view per frame (verified), so NO idempotency guard is needed.
+//
+// Gameplay-only BY GATE (verified): the function's entry gate `cmp byte [rcx+0xC0],0;
+// jnz ...` closes during cutscenes and dialogue, so the eye store is never reached then -
+// fires_ctx0 freezes, gateskip climbs. This multiplier therefore does NOT touch scripted
+// cutscene/dialogue camera framing - distinct from ProjMatrixFOV/ADR-0011, which DOES
+// affect cutscenes (it sits at the projection builder, downstream of any such gate).
+//
+// KNOWN LIMITATION: camera wall-collision is computed UPSTREAM of this commit, so
+// multiplier > 1 can clip/push the eye into walls near geometry (documented, not fixed).
+//
+// Install gate: fCamDistMulti != 1.0 (product) OR - dev builds only - [Debug - Camera]
+// CamDiag = true (so the DIAG counting + |eye-at| watchdog stream F still work at 1.0).
+// At m == 1.0 with CamDiag off the hook is never installed -> zero overhead when unused.
+//
+// ONE hook on 0x00692497 in every flavor (verify: exactly one SafetyHookMid on this
+// address). In dev builds the single body ALSO does the DIAG-CAM2 counting when CamDiag
+// is set; in release it only multiplies. The dev-only ENTRY counting hook (0x00691F60,
+// gate-skip measurement) and the DIAG-CAM2 message counter live under #ifdef below.
+void CamDistCommit()
+{
+#ifdef GBFR_DEVBUILD
+    const bool bMulti = (fCamDistMulti != (float)1);
+    const bool bWantHook = bMulti || bCamDiag;
+#else
+    const bool bMulti = (fCamDistMulti != (float)1);
+    const bool bWantHook = bMulti;
+#endif // GBFR_DEVBUILD
+    if (!bWantHook)
+        return;   // m == 1.0 and (release, or dev with CamDiag off) -> zero overhead
+
+    // Static main-view ctx: resolved once, only COMPARED against rsi (never dereferenced
+    // through the hook). base + 0x07C25360 = ctx0 (CAMDIST_HUNT2/3, PATTERNS.md 2.8/2.9).
+    g_pCamCtx0 = reinterpret_cast<const uint8_t*>((uintptr_t)baseModule + 0x07C25360);
+
+    // --- The one mid-hook on the eye store 0x00692497 (multiply + dev counting) ---
+    uint8_t* EyeStoreHit = Memory::PatternScan(baseModule,
+        "C5 F8 29 46 10 C5 F8 29 4E 20 C5 F8 28 86 20 01 00 00 C5 F8 29 46 30");
+    if (EyeStoreHit)
+    {
+        LogInfo("HIT: CamDistCommit: %s+0x%llx (hook at +0x0; ctx0 %s+0x7C25360, multiplier %g)",
+            sExeName.c_str(), ModOffset(EyeStoreHit), sExeName.c_str(), fCamDistMulti);
+
+        static SafetyHookMid CamDistCommitHook{};
+        CamDistCommitHook = safetyhook::create_mid(EyeStoreHit,
+            [](SafetyHookContext& ctx)
+            {
+                // rsi = ctx, xmm0 = eye (vec4, about to be committed), xmm1 = at (vec4).
+                const bool bCtx0 = (reinterpret_cast<const uint8_t*>(ctx.rsi) == g_pCamCtx0);
+
+#ifdef GBFR_DEVBUILD
+                // DIAG counting (dev + CamDiag): tally reached commits and sample the
+                // live |eye-at| BEFORE any multiply is applied (feeds DIAG-CAM2 stream F).
+                if (bCamDiag)
+                {
+                    if (!bCtx0)
+                    {
+                        g_CamCommitFiresOther.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        g_CamCommitFiresCtx0.fetch_add(1, std::memory_order_relaxed);
+                        const float dx = ctx.xmm0.f32[0] - ctx.xmm1.f32[0];
+                        const float dy = ctx.xmm0.f32[1] - ctx.xmm1.f32[1];
+                        const float dz = ctx.xmm0.f32[2] - ctx.xmm1.f32[2];
+                        const float fDist = sqrtf(dx * dx + dy * dy + dz * dz);
+                        if (!g_CamCommitCountLog.exchange(true))
+                            LogInfo("FIRED: CamDistCommit counting ctx0 (main view) - |eye-at|=%.3f (pre-multiply sample)", fDist);
+                        uint32_t distBits;
+                        memcpy(&distBits, &fDist, sizeof(distBits));
+                        if (!g_CamCommitHaveDist.load(std::memory_order_relaxed))
+                        {
+                            g_CamCommitDistMinBits.store(distBits, std::memory_order_relaxed);
+                            g_CamCommitDistMaxBits.store(distBits, std::memory_order_relaxed);
+                            g_CamCommitHaveDist.store(true, std::memory_order_relaxed);
+                        }
+                        else
+                        {
+                            float fMin, fMax;
+                            uint32_t minB = g_CamCommitDistMinBits.load(std::memory_order_relaxed);
+                            uint32_t maxB = g_CamCommitDistMaxBits.load(std::memory_order_relaxed);
+                            memcpy(&fMin, &minB, sizeof(fMin));
+                            memcpy(&fMax, &maxB, sizeof(fMax));
+                            if (fDist < fMin) g_CamCommitDistMinBits.store(distBits, std::memory_order_relaxed);
+                            if (fDist > fMax) g_CamCommitDistMaxBits.store(distBits, std::memory_order_relaxed);
+                        }
+                    }
+                }
+#endif // GBFR_DEVBUILD
+
+                // The MULTIPLY (both flavors): main view only, register-only.
+                // eye.xyz = at.xyz + (eye.xyz - at.xyz) * m ; xmm0 lane 3 (w) untouched.
+                // Skipped when m == 1.0 (dev counting-only mode leaves the eye intact).
+                if (bCtx0 && fCamDistMulti != (float)1)
+                {
+                    const float at0 = ctx.xmm1.f32[0];
+                    const float at1 = ctx.xmm1.f32[1];
+                    const float at2 = ctx.xmm1.f32[2];
+                    if (!g_CamDistFiredLog.exchange(true))
+                    {
+                        const float dx = ctx.xmm0.f32[0] - at0;
+                        const float dy = ctx.xmm0.f32[1] - at1;
+                        const float dz = ctx.xmm0.f32[2] - at2;
+                        const float fDist = sqrtf(dx * dx + dy * dy + dz * dz);
+                        LogInfo("FIRED: CamDistCommit (main view) - |eye-at| %g -> %g (x%g, eye dollied about look-at)",
+                            fDist, fDist * fCamDistMulti, fCamDistMulti);
+                    }
+                    ctx.xmm0.f32[0] = at0 + (ctx.xmm0.f32[0] - at0) * fCamDistMulti;
+                    ctx.xmm0.f32[1] = at1 + (ctx.xmm0.f32[1] - at1) * fCamDistMulti;
+                    ctx.xmm0.f32[2] = at2 + (ctx.xmm0.f32[2] - at2) * fCamDistMulti;
+                }
+            });
+
+        if (bMulti)
+            LogInfo("CamDistCommit: multiplier %g installed (main view eye dollied about the look-at; cutscenes unaffected by the [rcx+0xC0] gate). "
+                "Known limitation: wall-collision is computed upstream, so m > 1 can clip the eye into walls.", fCamDistMulti);
+#ifdef GBFR_DEVBUILD
+        else
+            LogInfo("CamDistCommit: installed in DIAG counting mode ([Debug - Camera] CamDiag, multiplier %g) - eye untouched; DIAG-CAM2 stream F reports fires_ctx0 / fires_other / gateskip / |eye-at|", fCamDistMulti);
+#endif // GBFR_DEVBUILD
+    }
+    else
+    {
+        LogError("MISS: CamDistCommit eye-store pattern not found - camera distance multiplier disabled");
+    }
+
+#ifdef GBFR_DEVBUILD
+    // --- Dev + CamDiag only: the ENTRY counting hook 0x00691F60 (gate-skip measure) ---
+    // A SECOND, read-only hook (distinct address from the eye store above). Counts ctx0
+    // entries BEFORE the internal [rcx+0xC0] gate; a call whose gate is closed returns
+    // before the eye store, so gateskip = entries_ctx0 - fires_ctx0. Verifies the
+    // gameplay-only-by-gate property. Pattern offline-verified UNIQUE, scan=1 @ 0x00691F60.
+    if (bCamDiag)
+    {
+        uint8_t* EntryHit = Memory::PatternScan(baseModule,
+            "56 53 48 81 EC 88 00 00 00 C5 F8 29 74 24 70 80 B9 C0 00 00 00 00");
+        if (EntryHit)
+        {
+            LogInfo("HIT: CamDistCommit entry(counter): %s+0x%llx (read-only counting hook at +0x0, pre-gate)",
+                sExeName.c_str(), ModOffset(EntryHit));
+
+            static SafetyHookMid CamDistEntryCounterHook{};
+            CamDistEntryCounterHook = safetyhook::create_mid(EntryHit,
+                [](SafetyHookContext& ctx)
+                {
+                    // rcx = ctx at function entry, BEFORE the [rcx+0xC0] gate. READ ONLY.
+                    if (reinterpret_cast<const uint8_t*>(ctx.rcx) == g_pCamCtx0)
+                        g_CamCommitEntriesCtx0.fetch_add(1, std::memory_order_relaxed);
+                });
+        }
+        else
+        {
+            LogError("MISS: CamDistCommit entry(counter) pattern not found - gate-skip count unavailable (infer from framerate instead)");
+        }
+
+        // DIAG-CAM2 stream D: id-6 camera-message consumer counter - v1's distance path.
+        // Pattern verified unique offline @ RVA 0x00A840D7 (CAMDIST_HUNT2 4.2):
+        //   +0x00  mov eax, [rsi+0x18]     ; payload id  <== COUNTING HOOK
+        //   +0x09  vmovss xmm0, [rsi+0x1C] ; distance (cm)
+        // Count + last dist only; the message is NEVER modified. Independent dev
+        // instrumentation kept after the old 4-site CamCommitDist hook was removed.
+        uint8_t* MsgCamScanResult = Memory::PatternScan(baseModule,
+            "8B 46 18 89 87 88 13 00 00 C5 FA 10 46 1C C5 FA 11 87 98 13 00 00");
+        if (MsgCamScanResult)
+        {
+            LogInfo("HIT: MsgCamDist(counter): %s+0x%llx (counting hook at +0x0 - message never modified)",
+                sExeName.c_str(), ModOffset(MsgCamScanResult));
+
+            static SafetyHookMid MsgCamCounterMidHook{};
+            MsgCamCounterMidHook = safetyhook::create_mid(MsgCamScanResult,
+                [](SafetyHookContext& ctx)
+                {
+                    // rsi = message payload (+0x18 id, +0x1C dist), rdi = receiving
+                    // behavior. Count + last dist only.
+                    g_MsgCam6Count.fetch_add(1, std::memory_order_relaxed);
+                    uint32_t distBits = 0;
+                    memcpy(&distBits, reinterpret_cast<const void*>(ctx.rsi + 0x1C), sizeof(distBits));
+                    g_MsgCam6LastDistBits.store(distBits, std::memory_order_relaxed);
+                });
+        }
+        else
+        {
+            LogError("MISS: MsgCamDist(counter) pattern not found - DIAG-CAM2 message stream unavailable");
+        }
+    }
+#endif // GBFR_DEVBUILD
 }
 
 void HUDFix()
@@ -2128,35 +2438,41 @@ static void DiagDump()
 }
 
 #ifdef GBFR_DEVBUILD
-// [DEV 2026-07-10] DIAG-CAMDIST - camera-distance live watchdog (dev builds only).
+// [DEV 2026-07-10] DIAG-CAM2 - camera-distance observation watchdog (dev builds
+// only, armed by [Debug - Camera] CamDiag = true in GBFRUltrawide.dev.ini).
 //
-// Why it exists: two static hunts for the live camera-distance path both produced
-// hooks that HIT but never FIRED across full gameplay sessions (first the
-// v1-relocated GameplayCamera message site, then the community-derived
-// CamDistPreset x4 / FollowCamDist / RoamCamDist trio - see AspectFOVFix). The next
-// hunt has to be observation-driven, so this watchdog runs on the Main thread after
-// DiagDump and samples every ~2s, logging ONLY on change (bounded per stream):
-//
-//   1) The published preset-distance global [exe+0x07C25720] (float, meters,
-//      default 4.8 - PATTERNS.md 2.5 / FOV_CAMDIST_SPEC Bug B). Interpretation:
-//      - value NEVER changes while the in-game camera visibly zooms in/out
-//        (lock-on, combat pull-back, indoor cameras) => the global is a COLD
-//        preset copy, not the live distance; stop hunting its writers.
-//      - value tracks visible camera-distance changes => the global IS live and
-//        the preset-publish path just runs before our scan; re-hunt its writers
-//        (e.g. hardware write-watch on 0x07C25720).
-//
-//   2) The most recent camera/view-params object cached by the AspectRatio /
-//      ProjMatrixAspect hooks (g_DiagCamObj): +0x9D0 aspect, +0x9D4 FOV(radians).
-//      These are the only two float fields FOV_CAMDIST_SPEC verifies on this
-//      struct; the spec names NO distance field on it (the preset struct's +0x14
-//      and the roam-config +0x38/+0x54 copies live on DIFFERENT structs), so no
-//      distance-candidate window is scanned here - observation only, no guessing.
-//
-// Reads are VirtualQuery-guarded (same defensive practice as the pattern scanner,
-// ADR-0002): the exe global is always committed, but the cached camera object can
-// go stale between hook fire and watchdog tick.
-static bool DiagSafeReadFloat(uintptr_t addr, float* out)
+// Replaces the retired DIAG-CAMDIST watchdog. Its two questions are answered:
+//   - the "preset distance global" 0x07C25720 is mainView+0x3C0 - the static view
+//     ctx's preset-publish tail, COLD (zero rip-visible readers; field sessions
+//     showed a constant 4.8). Stream retired, stop watching it.
+//   - the camera-object +0x9D0/+0x9D4 stream served the FOV hunt concluded by
+//     ADR-0011.
+// Offline hunt #2 (CAMDIST_HUNT2, 2026-07-10) mapped the real registry: the 8-slot
+// view-context table 0x054BF400 (index [0x07021320]), slot 0 = the STATIC main view
+// ctx @ 0x07C25360. Live camera distance is GEOMETRIC - |eye - at| of the ctx's
+// committed pair - not a hot scalar global. This watchdog implements the hunt's
+// observation plan (PATTERNS.md 3.25); it now runs ALONGSIDE the shipping
+// CamDistCommit multiplier as a monitoring instrument (it gated Run B originally):
+//   A) committed |eye-at| (0x07C25370/0x07C25380) + staged |eye-at| (0x07C25670/
+//      0x07C25680), log on change beyond epsilon, with running min/max. Units are
+//      meters (verified 0.679..6.566 m in-game, CAMDIST_HUNT3).
+//   C) behavior object [0x07C25438]: type id (+0x40) and the +0x1398/+0x139C
+//      distance family (cm) - sampled for reference (does NOT drive the live path;
+//      CAMDIST_HUNT2 showed +0x1398 is not the live scalar).
+//   D) id-6 camera-message liveness counter, every ~5s on change - decides MsgCamDist
+//      eligibility (v1's dead path; expect 0 in v2 gameplay).
+//   E) mode flag bytes [0x07C25711] (manual/photo cam) / [0x07C25713] (recommit) -
+//      labels the samples by camera mode.
+//   F) CAMDIST_HUNT3 live-writer counters (fires_ctx0/fires_other/gateskip/|eye-at|)
+//      from the SHIPPING 0x00692497 mid-hook - the real per-frame commit site. See
+//      the stream-F block below. (The old stream B - four dead rip-relative commit
+//      sites - was removed with that hook; only stream F carries commit counts now.)
+// All statics are v2.0.2 RVAs (module timestamp 1782470458), same version-pinned
+// convention as DiagDump. Heap reads (behavior object) are VirtualQuery-guarded
+// (ADR-0002 defensive practice); exe-image statics are always committed.
+// Everything logs ON CHANGE only, greppable prefix "DIAG-CAM2:", shared hard budget
+// 128 lines per session.
+static bool DiagSafeRead(uintptr_t addr, void* out, size_t size)
 {
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)))
@@ -2167,76 +2483,206 @@ static bool DiagSafeReadFloat(uintptr_t addr, float* out)
         PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     if (!(mbi.Protect & kReadable))
         return false;
-    *out = *reinterpret_cast<const volatile float*>(addr);
+    if (addr + size > (uintptr_t)mbi.BaseAddress + mbi.RegionSize)
+        return false; // crosses out of the queried region - don't risk the tail
+    memcpy(out, reinterpret_cast<const void*>(addr), size);
     return true;
 }
 
-static void DiagCamDistWatchdog()
+static void DiagCam2Watchdog()
 {
-    constexpr int kMaxLines = 64; // change-line budget PER STREAM per session
-    const uintptr_t presetGlobal = (uintptr_t)baseModule + 0x07C25720;
+    if (!bCamDiag)
+        return;
 
-    float fLastPreset = 0.0f;
-    bool  bHavePreset = false;
-    int   iPresetLines = 0;
+    constexpr int kMaxLines = 128;   // shared change-line budget per session
+    int iLines = 0;
 
-    float fLastAspect = 0.0f, fLastFov = 0.0f;
-    bool  bHaveCam = false;
-    int   iCamLines = 0;
+    const uintptr_t base = (uintptr_t)baseModule;
+    const uintptr_t committedEye = base + 0x07C25370;   // mainView+0x10
+    const uintptr_t committedAt  = base + 0x07C25380;   // mainView+0x20
+    const uintptr_t stagedEye    = base + 0x07C25670;   // mainView+0x310
+    const uintptr_t stagedAt     = base + 0x07C25680;   // mainView+0x320
+    const uintptr_t behaviorPtr  = base + 0x07C25438;   // mainView+0xD8
+    const uintptr_t flagManual   = base + 0x07C25711;   // mainView+0x3B1
+    const uintptr_t flagRecommit = base + 0x07C25713;   // mainView+0x3B3
 
-    LogInfo("DIAG-CAMDIST: watchdog armed - sampling preset-distance global %s+0x7C25720 "
-        "(meters, default 4.8) and latest camera object (+0x9D0 aspect / +0x9D4 FOV) every 2s; "
-        "log-on-change only, max %d lines per stream", sExeName.c_str(), kMaxLines);
+    LogInfo("DIAG-CAM2: watchdog armed - committed eye/at %s+0x7C25370/80, staged +0x7C25670/80, "
+        "behavior [%s+0x7C25438], flags +0x7C25711/13; 1s sampling, counters every 5s, "
+        "log-on-change, shared budget %d lines", sExeName.c_str(), sExeName.c_str(), kMaxLines);
 
-    while (iPresetLines < kMaxLines || iCamLines < kMaxLines)
+    // Stream A state (distances; units unknown - log raw).
+    float fLastCommitted = 0.0f, fLastStaged = 0.0f;
+    bool  bHaveDist = false;
+    float fMinDist = 0.0f, fMaxDist = 0.0f;
+    constexpr float kDistEps = 0.01f;
+
+    // Stream D state (id-6 camera-message counter). The old stream B (the four dead
+    // rip-relative commit sites) was removed with that hook - the LIVE commit counters
+    // are now stream F below.
+    uint32_t lastMsgCount = 0;
+    bool bHaveCounters = false;
+
+    // Stream C state (behavior object; floats compared bitwise so a NaN field
+    // cannot burn the budget every tick).
+    unsigned long long lastObj = 0;
+    int      lastType = 0;
+    uint32_t lastBDistBits = 0, lastBDist2Bits = 0;
+    bool bHaveBehavior = false;
+
+    // Stream E state (flags).
+    uint8_t lastManual = 0, lastRecommit = 0;
+    bool bHaveFlags = false;
+
+    // Stream F state (CAMDIST_HUNT3 live-writer verification counters).
+    uint32_t lastFiresCtx0 = 0, lastFiresOther = 0, lastEntriesCtx0 = 0;
+    bool bHaveCommit = false;
+
+    auto dist3 = [](const float* p, const float* q)
     {
-        Sleep(2000);
+        const float dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+        return sqrtf(dx * dx + dy * dy + dz * dz);
+    };
 
-        // Stream 1: preset-distance global.
-        if (iPresetLines < kMaxLines)
+    int iTick = 0;
+    while (iLines < kMaxLines)
+    {
+        Sleep(1000);
+        ++iTick;
+
+        // A) committed + staged |eye-at|.
+        float e[3], a[3], se[3], sa[3];
+        if (iLines < kMaxLines
+            && DiagSafeRead(committedEye, e, sizeof(e)) && DiagSafeRead(committedAt, a, sizeof(a))
+            && DiagSafeRead(stagedEye, se, sizeof(se)) && DiagSafeRead(stagedAt, sa, sizeof(sa)))
         {
-            float v = 0.0f;
-            if (DiagSafeReadFloat(presetGlobal, &v) && (!bHavePreset || v != fLastPreset))
+            const float dc = dist3(e, a);
+            const float ds = dist3(se, sa);
+            if (bHaveDist)
             {
-                if (!bHavePreset)
-                    LogInfo("DIAG-CAMDIST: preset global baseline %g (%s+0x7C25720; "
-                        "watch whether this EVER moves when the in-game camera zooms)",
-                        v, sExeName.c_str());
-                else
-                    LogInfo("DIAG-CAMDIST: preset global %g -> %g", fLastPreset, v);
-                fLastPreset = v;
-                bHavePreset = true;
-                ++iPresetLines;
+                if (dc < fMinDist) fMinDist = dc;
+                if (dc > fMaxDist) fMaxDist = dc;
+            }
+            else
+            {
+                fMinDist = fMaxDist = dc;
+            }
+            if (!bHaveDist || fabsf(dc - fLastCommitted) > kDistEps || fabsf(ds - fLastStaged) > kDistEps)
+            {
+                LogInfo("DIAG-CAM2: dist committed=%.3f staged=%.3f (eye %.2f/%.2f/%.2f at %.2f/%.2f/%.2f) [min %.3f max %.3f]",
+                    dc, ds, e[0], e[1], e[2], a[0], a[1], a[2], fMinDist, fMaxDist);
+                fLastCommitted = dc;
+                fLastStaged = ds;
+                bHaveDist = true;
+                ++iLines;
             }
         }
 
-        // Stream 2: cached camera object fields. Compared by VALUE (not pointer)
-        // so several camera objects alternating with identical aspect/FOV do not
-        // burn the line budget; the pointer is still printed for context.
-        if (iCamLines < kMaxLines)
+        // D) id-6 camera-message consumer counter, every 5th tick, on change.
+        if (iLines < kMaxLines && (iTick % 5) == 0)
         {
-            const uintptr_t cam = g_DiagCamObj.load(std::memory_order_relaxed);
-            float fAspect = 0.0f, fFov = 0.0f;
-            if (cam
-                && DiagSafeReadFloat(cam + 0x9D0, &fAspect)
-                && DiagSafeReadFloat(cam + 0x9D4, &fFov)
-                && (!bHaveCam || fAspect != fLastAspect || fFov != fLastFov))
+            const uint32_t msgCount = g_MsgCam6Count.load(std::memory_order_relaxed);
+            if (!bHaveCounters || msgCount != lastMsgCount)
             {
-                if (!bHaveCam)
-                    LogInfo("DIAG-CAMDIST: camera obj 0x%llx baseline aspect=%g fov=%g rad (%.1f deg)",
-                        (unsigned long long)cam, fAspect, fFov, fFov * 180.0f / 3.14159265f);
-                else
-                    LogInfo("DIAG-CAMDIST: camera obj 0x%llx aspect %g -> %g | fov %g -> %g rad (%.1f deg)",
-                        (unsigned long long)cam, fLastAspect, fAspect, fLastFov, fFov,
-                        fFov * 180.0f / 3.14159265f);
-                fLastAspect = fAspect;
-                fLastFov = fFov;
-                bHaveCam = true;
-                ++iCamLines;
+                float fMsgDist = 0.0f;
+                const uint32_t distBits = g_MsgCam6LastDistBits.load(std::memory_order_relaxed);
+                memcpy(&fMsgDist, &distBits, sizeof(fMsgDist));
+                LogInfo("DIAG-CAM2: msg6=%u lastMsgDist=%g", msgCount, fMsgDist);
+                lastMsgCount = msgCount;
+                bHaveCounters = true;
+                ++iLines;
+            }
+        }
+
+        // F) CAMDIST_HUNT3 live-writer counters (0x00691F60 / 0x00692497), every 5th
+        // tick, on change. This is the SHIPPING multiplier's site - the same 0x00692497
+        // mid-hook that scales the eye also feeds these counters in dev+CamDiag builds.
+        // The |eye-at| here is the PRE-multiply sample (measured before the scale in the
+        // shared hook body), so it always reflects the game's native distance.
+        //   fires_ctx0  = eye store 0x00692497 reached with rsi==ctx0 (main view)
+        //   fires_other = eye store reached with rsi!=ctx0 (the 9 aux views; ~9x fires_ctx0)
+        //   gateskip    = entries_ctx0 - fires_ctx0 (ctx0 calls whose [rcx+0xC0]
+        //                 gate closed before the eye store; 0 = gate open = gameplay;
+        //                 climbs during cutscenes/dialogue = gameplay-only-by-gate)
+        //   |eye-at|    = min..max of the live main-view eye/at distance (meters)
+        if (iLines < kMaxLines && (iTick % 5) == 0)
+        {
+            const uint32_t fc0 = g_CamCommitFiresCtx0.load(std::memory_order_relaxed);
+            const uint32_t foth = g_CamCommitFiresOther.load(std::memory_order_relaxed);
+            const uint32_t ec0 = g_CamCommitEntriesCtx0.load(std::memory_order_relaxed);
+            if (!bHaveCommit || fc0 != lastFiresCtx0 || foth != lastFiresOther || ec0 != lastEntriesCtx0)
+            {
+                // gateskip: entries that never reached the store. entries hook may be
+                // absent (MISS) - then ec0 stays 0 and we report skip as N/A via a
+                // negative-safe clamp. If the entry hook is live, ec0 >= fc0 always.
+                const long gateskip = (ec0 >= fc0) ? (long)(ec0 - fc0) : 0;
+                float fMin = 0.0f, fMax = 0.0f;
+                if (g_CamCommitHaveDist.load(std::memory_order_relaxed))
+                {
+                    uint32_t minB = g_CamCommitDistMinBits.load(std::memory_order_relaxed);
+                    uint32_t maxB = g_CamCommitDistMaxBits.load(std::memory_order_relaxed);
+                    memcpy(&fMin, &minB, sizeof(fMin));
+                    memcpy(&fMax, &maxB, sizeof(fMax));
+                }
+                LogInfo("DIAG-CAM2: camcommit fires_ctx0=%u fires_other=%u gateskip=%ld (entries_ctx0=%u) |eye-at|=%.3f..%.3f",
+                    fc0, foth, gateskip, ec0, fMin, fMax);
+                lastFiresCtx0 = fc0;
+                lastFiresOther = foth;
+                lastEntriesCtx0 = ec0;
+                bHaveCommit = true;
+                ++iLines;
+            }
+        }
+
+        // C) behavior object identity + distance family.
+        if (iLines < kMaxLines)
+        {
+            unsigned long long obj = 0;
+            if (DiagSafeRead(behaviorPtr, &obj, sizeof(obj)) && obj)
+            {
+                int type = 0;
+                uint32_t bDistBits = 0, bDist2Bits = 0;
+                if (DiagSafeRead((uintptr_t)obj + 0x40, &type, sizeof(type))
+                    && DiagSafeRead((uintptr_t)obj + 0x1398, &bDistBits, sizeof(bDistBits))
+                    && DiagSafeRead((uintptr_t)obj + 0x139C, &bDist2Bits, sizeof(bDist2Bits)))
+                {
+                    if (!bHaveBehavior || obj != lastObj || type != lastType
+                        || bDistBits != lastBDistBits || bDist2Bits != lastBDist2Bits)
+                    {
+                        float bd = 0.0f, bd2 = 0.0f;
+                        memcpy(&bd, &bDistBits, sizeof(bd));
+                        memcpy(&bd2, &bDist2Bits, sizeof(bd2));
+                        LogInfo("DIAG-CAM2: behavior obj=0x%llx type=0x%x dist(+0x1398)=%g dist2(+0x139C)=%g",
+                            obj, type, bd, bd2);
+                        lastObj = obj;
+                        lastType = type;
+                        lastBDistBits = bDistBits;
+                        lastBDist2Bits = bDist2Bits;
+                        bHaveBehavior = true;
+                        ++iLines;
+                    }
+                }
+            }
+        }
+
+        // E) mode flag bytes.
+        if (iLines < kMaxLines)
+        {
+            uint8_t m = 0, r = 0;
+            if (DiagSafeRead(flagManual, &m, 1) && DiagSafeRead(flagRecommit, &r, 1))
+            {
+                if (!bHaveFlags || m != lastManual || r != lastRecommit)
+                {
+                    LogInfo("DIAG-CAM2: flags manual(+0x3B1)=%u recommit(+0x3B3)=%u", m, r);
+                    lastManual = m;
+                    lastRecommit = r;
+                    bHaveFlags = true;
+                    ++iLines;
+                }
             }
         }
     }
-    LogInfo("DIAG-CAMDIST: all change-line budgets exhausted - watchdog stopped");
+    LogInfo("DIAG-CAM2: line budget exhausted - watchdog stopped (committed dist min %.3f max %.3f)",
+        fMinDist, fMaxDist);
 }
 #endif // GBFR_DEVBUILD
 
@@ -2248,6 +2694,10 @@ DWORD __stdcall Main(void*)
     Sleep(iInjectionDelay);
     GraphicalFixes();
     AspectFOVFix();
+    CamDistCommit();    // SHIPPING camera distance multiplier at the register-base eye
+                        // committer 0x00692497 (CAMDIST_HUNT3). One mid-hook in both
+                        // flavors; dev+CamDiag adds the DIAG counting/entry/msg hooks.
+                        // No pattern overlap with the AspectFOVFix block above.
     NameplateFix();     // before HUDFix: resolves g_pNameplateScalar, which the
                         // HUDConstraints hook reads once it starts firing
     HUDFix();
@@ -2256,8 +2706,9 @@ DWORD __stdcall Main(void*)
     DiagDump();
 #ifdef GBFR_DEVBUILD
     // Dev builds: the Main thread has nothing left to do, so it becomes the
-    // DIAG-CAMDIST sampling thread (returns once all change budgets are spent).
-    DiagCamDistWatchdog();
+    // DIAG-CAM2 sampling thread when [Debug - Camera] CamDiag is set (returns once
+    // the change-line budget is spent; immediately when CamDiag is off).
+    DiagCam2Watchdog();
 #endif // GBFR_DEVBUILD
     return true;
 }
