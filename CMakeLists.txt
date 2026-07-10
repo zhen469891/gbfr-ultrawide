@@ -10,6 +10,11 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Development build: honors the [Debug - Span HUD] ini section (Probe element
+# logging + EdgeSnapIds/MoveIds per-element overrides). OFF = release build,
+# which compiles all of that out and ignores the section entirely.
+option(GBFR_DEV "Enable development/debug features ([Debug - Span HUD] ini section)" OFF)
+
 # Static CRT
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -35,3 +40,7 @@ target_include_directories(GBFRUltrawide PRIVATE
 target_compile_definitions(GBFRUltrawide PRIVATE
     _CRT_SECURE_NO_WARNINGS
 )
+
+if(GBFR_DEV)
+    target_compile_definitions(GBFRUltrawide PRIVATE GBFR_DEVBUILD)
+endif()

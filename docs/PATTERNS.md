@@ -246,7 +246,7 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Pattern:** `C5 7A 10 ?? ?? ?? 00 00 C5 7A 11 ?? ?? C5 FA 10 ?? ?? ?? 00 00 C5 FA 11 ?? ?? C5 7A 10 ?? ?? ?? 00 00 C5 7A 11 ?? ?? 48 85 C0 74` (three load+store pairs + `test/jz`).
 - **Hits / RVA:** unique @ RVA 0x009D8C70; distance hook **+0x8** (before `vmovss [rbp-0x14], xmm9`).
 - **Hook semantics:** `if fCamDistMulti != 1: ctx.xmm9.f32[0] *= fCamDistMulti` — distance is in xmm9, not yet written to the message block, and the game's own per-area clamps (300 cm indoor / 800 cm general) still apply after. (v1 used xmm8.)
-- **FOV — why not supported:** v1's camera message was `{id, dist, FOV, yaw}`; v2.0.2 sends `{id, dist, pitch, yaw}`. The old FOV slot (loaded via xmm7 at pattern+0xD, camera field +0x13A0) is now a **pitch angle in radians** — readers multiply by 1/(2π) and wrap to [−π,π). A v1-style FOV hook here would tilt the camera. `dllmain.cpp` logs a `NOT SUPPORTED` warning instead. FOV is now delivered via preset(id)/camera-blackboard paths.
+- **FOV — why not hooked here:** v1's camera message was `{id, dist, FOV, yaw}`; v2.0.2 sends `{id, dist, pitch, yaw}`. The old FOV slot (loaded via xmm7 at pattern+0xD, camera field +0x13A0) is now a **pitch angle in radians** — readers multiply by 1/(2π) and wrap to [−π,π). A v1-style FOV hook here would tilt the camera. Since 2026-07-10 the FOV multiplier is delivered by **ViewParamsFOV** (§3.17) at the view-params consumer site instead; only the `<16:9` vert- compensation remains unported.
 - **v1→v2:** stack frame changed `rsp`→`rbp` (6-byte SIB stores → 5-byte disp8), and `mov rax,[rsi+0x4358]` was hoisted above the float loads — killing the v1 pattern. Struct offsets (`+0x1398` dist, `+0x13A0` pitch, `+0x13A8` yaw) unchanged.
 - **Hunt method:** `scan "C5 7A 10 ?? ?? ?? ?? 00 C5 7A 11"` → 13 hits, narrowed by `disasm` to 0x009D8C70; cross-checked against consumer handler 0x00A840D7, the 300/800 cm clamp compares, and the distance-squared / atan2-yaw / ÷2π writers to prove the field roles (dist +0x1398, pitch +0x13A0, yaw +0x13A8).
 - **Confidence:** distance HIGH; the "v1 FOV slot is now pitch" reconstruction MEDIUM (no v1 exe to diff against). **Fallback:** offset-anchored pattern `C5 7A 10 ?? 98 13 00 00 …`.
@@ -302,17 +302,25 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
   - Struct offsets in the lambda: ID +0x1C4, width +0x1BC, height +0x1C0 (§2.1).
 - **v1→v2:** struct shift −0x38; width register xmm0→xmm1; `<16:9` hook +0x28→+0x29 (v1's +0x28 landed on the last byte of the 8-byte `vmovss xmm4,[rax+0x1C0]`).
 - **Hunt method:** `disasm` at base showed the width load into xmm1 and the mid-instruction boundary at +0x28.
+- **Cross-verified 2026-07-10** against community ultrawide research for this exe build (0x6A3E573A): the ID lists (12 width / 11 height = width minus dialogue bg 2454207042), formulas and gating shape match ours exactly. A height hook at pattern+0x57 would land **mid-instruction** in this exe (an off-by-one seen in the wild, never exercised — it only installs at <16:9); the correct boundary is pattern+0x58 = our base+0x29, which we already use.
 - **Confidence:** HIGH.
 
-### 3.12 HUDConstraints (`HUDFix`)
+### 3.12 HUDConstraints (`HUDFix`) — REWORKED 2026-07-10
 
-- **Feature:** span / offset specific HUD elements by object ID (gameplay HUD, guard & lock-on, dodge), plus `SpanAllHUD`.
+- **Feature:** Span HUD — widen full-canvas HUD parents with a three-layer menu/story filter, recenter combat prompts, apply per-id position overrides (dev builds only), refresh the nameplate scale global. Derived from independent analysis of the v2.0.2 exe (build 0x6A3E573A), cross-validated against community ultrawide research; replaces Lyall's v1 ID-gated body, which was inert on v2 (none of the v1 object IDs appear; +0x194/+0x198 are normalized anchors, not pixel offsets — ADR-0006 appendix).
 - **Pattern:** `48 ?? ?? ?? ?? ?? 00 48 ?? ?? 74 ?? C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 EB ??`
-- **Hits / RVA:** @ RVA 0x0261C638; hook **+0x1C** (RVA 0x0261C654; `xmm2=width [rax+0x1BC]`, `xmm0=height [rax+0x1C0]` — registers unchanged from v1).
-- **Hook semantics:** switch on `*(int*)(rax+0x1C4)`: gameplay HUD 1719602056 (span xmm2/xmm0), guard&lock-on 605904162 and dodge 3550204025 (offset via rax+0x194 / +0x198), plus `SpanAllHUD` (mark rax+0x1C8 = 1234). See §2.1 for offsets.
-- **v1→v2:** hook offset and xmm registers unchanged; only the lambda struct offsets shifted −0x38.
-- **Hunt method:** `disasm` confirmed +0x1C is the correct boundary (xmm2/xmm0 hold width/height from +0x1BC/+0x1C0) and that the defaults come from globals `0x06B84098/9C` (1920/1080, `vcvtsi2ss`'d into xmm2/xmm0).
-- **Confidence:** HIGH.
+- **Hits / RVA:** @ RVA 0x0261C638; hook **+0x1C** (RVA 0x0261C654). Site registers: **rcx = child element, rax = parent canvas** (non-null — the site's `test/jz` at +0x07 jumps past the hook), `xmm2 = parent width [rax+0x1BC]`, `xmm0 = parent height [rax+0x1C0]`.
+- **Hook semantics** (child struct: +0x19C px.x, +0x1A4/+0x1AC anchorA.x/anchorB.x, +0x1BC w, +0x1C0 h, +0x1C4 id):
+  1. **Nameplate refresh** (`bFixNameplates`, >16:9): `*g_pNameplateScalar = 1/fAspectRatio` (see §3.18).
+  2. **EdgeSnapIds / MoveIds** (wide only; **dev builds only** — `#ifdef GBFR_DEVBUILD`, set via `build.ps1 -Dev` / CMake `GBFR_DEV=ON`; ini `[Debug - Span HUD] EdgeSnapIds = id,id,…` / `MoveIds = id:deltaX,…`): per-child-id px.x overrides applied **before** any blocklist decision, so even blocklisted menu children can be pushed to the true screen edge. Capture base px.x on first sight (fixed-capacity, 32 ids per list, shared 64-slot base map), then every pass write `[child+0x19C] = base + delta` where delta is explicit (MoveIds, canvas units) or `sign(base) · (2160·fHUDAspectRatio − 3840)/2` (EdgeSnapIds — the canvas half-widening delta). MoveIds overrides EdgeSnapIds for the same id. `|base| < 1` in EdgeSnap mode = side unknown → left unchanged, warned once. **Position only** — the widen registers are never touched here.
+  3. **Combat Prompts** (wide only): children of host **2939675107** with anchors 0.5/0.5 and `|px.x| ≥ 1600` → capture base px.x on first sight (fixed-capacity map, 16 slots), then write `[child+0x19C] = base * fAspectMultiplier` every pass.
+  4. **Gameplay HUD root 1719602056**: span unconditionally (the one v1 id still carried by community research for this build; possibly dead on v2 — one-shot FIRED log tells).
+  5. **SpanAllHUD register mode** (`bSpanAllHUD`): block if (parent id ∈ blocklist{1579537302, 584127281, 141651223, 3723338869, 2229826448, 1465589452, 2464430819, 368881640} OR parent id ∈ menuTree OR child id ∈ {3646400251, 3659745599, 178979338}) AND child anchorA.x == anchorB.x; menuTree = `unordered_set` seeded {1465589452, 141651223, 584127281}, transitively marks children of marked parents, never cleared. Then widen only full-canvas parents (w==3840 && h==2160 exact): wide → `xmm2 = 2160*fHUDAspectRatio`, narrow → `xmm0 = 3840/fHUDAspectRatio`. **Register-only** — no struct writes in the widen paths.
+- **Probe diagnostic** (`[Debug - Span HUD] Probe = true`; **dev builds only** — release builds compile the probe machinery out, `probeLog` becomes a no-op): logs one greppable `PROBE: parent=… child=… wh=…x… anchors=…/… px=… verdict=…` line per unique child id (first 200, including skipped/blocklisted ones); verdicts: `edgesnap|move|prompt-recenter|widen-root|widen|skip-spanallhud-off|skip-menutree|skip-blocklist|skip-childblock|skip-not-fullcanvas`. Costs a single bool check when disabled. This is the discovery workflow for EdgeSnapIds/MoveIds candidates.
+- **Interaction with UIMarkersCanvas (§3.10):** the global canvas manager's width is rewritten to 2160·aspect by that hook; if the manager ever appears as "parent" here its w≠3840 so the full-canvas gate skips it — correct either way (root already widened).
+- **Diagnostics:** one-shot `FIRED: HUDConstraints`, per-unique-child `FIRED: HUDConstraints span #N: parent=… child=… …` (first 20) for post-test ID triage.
+- **Hunt method:** `disasm` confirmed the +0x1C boundary; body semantics derived from independent runtime analysis of the v2.0.2 exe, cross-validated against community ultrawide research.
+- **Confidence:** HIGH on site semantics (runtime-tested on this build); MEDIUM on ID-list completeness (hence the diagnostics).
 
 ### 3.13 ShadowQuality (`GraphicalTweaks`)
 
@@ -352,6 +360,26 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **v1→v2:** the limiter was rewritten — it now reads the target frame time from a 3-entry double table into xmm10 and busy-waits on `vucomisd + pause`.
 - **Hunt method:** anchored on the 3-entry double frame-time table **@ RVA 0x054D6BF0** = `{1/30, 1/60, 1/120}` (indexed by the fps menu setting; the index comes from `[0x07C26B70]` + `byte[rax+0x3D]`) — the most reliable anchor; `disasm` located the load + the `vucomisd`/`pause` busy-wait spin. A minimal alternative pattern is `C5 7B 10 14 C8` (hook +0x5).
 - **Confidence:** HIGH.
+
+### 3.17 ViewParamsFOV (`AspectFOVFix`, NEW 2026-07-10)
+
+- **Feature:** gameplay FOV multiplier (`[Gameplay FOV] Multiplier`) at the view-params consumer site. Replaces the dead v1-style GameplayCamera FOV path (§3.6). Derived from independent analysis of the v2.0.2 exe, cross-validated against community ultrawide research.
+- **Pattern:** `C5 ?? ?? ?? A0 09 00 00 C5 ?? ?? ?? A4 09 00 00 C5 ?? ?? ?? D0 09 00 00 C5 ?? ?? ?? D4 09 00 00` — the four adjacent view-params loads (viewport W `+0x9A0`, viewport H `+0x9A4`, aspect `+0x9D0`, FOV `+0x9D4`; rax = view-params object from the preceding `mov rax,[rbx]`).
+- **Hits / RVA:** expected unique @ RVA **0x0075109A**; hook **+0x20**, immediately after `vmovss xmm3,[rax+0x9D4]` loads the FOV.
+- **Hook semantics:** `ctx.xmm3.f32[0] *= fFOVMulti` — pure linear multiply, register only; no tan(), no memory write, no cutscene exclusion, no aspect gate. Installed only when `fFOVMulti != 1.0`.
+- **No aspect hook at +0x10:** pattern+0x10 is a viable spot to force `[obj+0x9D0]`; we don't hook it — our AspectRatio hook (§3.4) is installed at this very RVA and already force-writes `+0x9D0` before the +0x10 load.
+- **ORDERING IS LOAD-BEARING:** this pattern starts at the exact address the AspectRatio mid-hook patches, and the AspectRatio pattern (RVA 0x00751089, 0x37 bytes) spans the +0x20 hook site. `AspectFOVFix()` therefore scans **both** patterns before installing **either** hook — a scan after install MISSes on the trampoline `jmp` bytes.
+- **Confidence:** HIGH (site disasm verified against this exe; runtime-tested on this build).
+
+### 3.18 Nameplate (`NameplateFix`, NEW 2026-07-10)
+
+- **Feature:** world-anchored nameplate horizontal scale at >16:9. Derived from independent analysis of the v2.0.2 exe, cross-validated against community ultrawide research.
+- **Pattern (long, fully concrete):** `48 8B 48 60 C5 FA 10 89 A0 09 00 00 C5 FA 11 0D ?? ?? ?? ?? 48 8B 48 60 C5 FA 10 89 A4 09 00 00 C5 FA 11 0D ?? ?? ?? ?? 48 8B 40 60 C5 FA 10 3D ?? ?? ?? ?? C5 C2 5E 88 D0 09 00 00`
+- **Hits / RVA:** expected unique @ RVA **0x00847F6B**; hook **+0x3C**, right after `vdivss xmm1,xmm7,[rax+0x9D0]` (xmm1 = scale / hudProjectionAspect) and right before the game stores xmm1 to its nameplate-scale global.
+- **Hook semantics:** `s = xmm7; if (s == 0) s = 1; xmm1 = s / fAspectRatio` — divide by the **live** aspect (bss `fAspectRatio`), not 1.7778: `[rax+0x9D0]` is the HUD-projection aspect our other hooks force, so re-deriving from the true screen aspect re-projects nameplates correctly.
+- **g_pNameplateScalar:** the store at +0x3C is `C5 FA 11 0D disp32` (8 bytes); the game global (≈RVA 0x07194FCC) is resolved at scan time as `site + 0x3C + 8 + disp32` (byte-checked first, **before** the mid-hook rewrites the site). The HUDConstraints hook (§3.12 step 1) refreshes it to `1/fAspectRatio` every pass, covering frames where this site doesn't run.
+- **Install gates:** `bFixNameplates` (`[Fix Nameplates] Enabled`, default true) AND `fAspectRatio > 16:9`.
+- **Confidence:** HIGH (0x3C bytes of concrete pattern; runtime-tested on this build).
 
 ---
 

@@ -12,6 +12,7 @@
 #include <Shlobj.h>
 #include <cstdint>
 #include <cstdarg>
+#include <cstdlib>
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -24,3 +25,4 @@
 #include <algorithm>
 #include <mutex>
 #include <atomic>
+#include <unordered_set>

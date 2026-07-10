@@ -22,8 +22,14 @@
 //                                                into xmm1; xmm0 is overwritten right after), <16:9 hook moved
 //                                                base+0x28 -> base+0x29 (v1 offset landed inside an 8-byte vmovss);
 //                                                lambda struct offsets shifted -0x38
-//   [FIXED] HUDConstraints  (HUDFix)           - hook at +0x1C unchanged, xmm2/xmm0 unchanged; lambda struct
-//                                                offsets shifted -0x38
+//   [REWORKED 2026-07-10] HUDConstraints (HUDFix) - hook at +0x1C unchanged (rcx = child element, rax = parent
+//                                                canvas, xmm2/xmm0 = parent w/h), but the v1 ID-gated body was
+//                                                inert on v2 (v1 object IDs never appear; +0x194/+0x198 are
+//                                                normalized anchors, not pixel offsets). Body replaced with the
+//                                                three-layer menu/story filter + full-canvas register widen +
+//                                                Combat Prompts recenter, derived from independent analysis of
+//                                                the v2.0.2 exe (build 0x6A3E573A) and cross-validated against
+//                                                community ultrawide research. See HUDFix() for details.
 //   [FIXED] ShadowQuality   (GraphicalTweaks)  - hook moved scan+0x0 -> scan-0x1 (v2 adds REX.X prefix 0x42, pattern
 //                                                hits mid-instruction); addressing now rax+r8 (was rcx+rdx)
 //   [OK]    TemporalAA      (GraphicalTweaks)  - verified; byte patch, not a hook
@@ -56,9 +62,21 @@
 //   [REFOUND v2.0.2] GfxCorruption2 (GraphicalFixes) - new pattern, 2 hits (alloc success/fallback arms), both
 //                                                hooked at +0x8; same lane0 = width/64 fix as GfxCorruption1
 //   [REFOUND v2.0.2 - PARTIAL] GameplayCamera (AspectFOVFix) - new pattern (unique hit RVA 0x009D8C70). CamDist OK:
-//                                                hook at +0x8, xmm9 (was -0xE, xmm8). FOV multiplier NOT SUPPORTED:
-//                                                v2's camera message is {id, dist, pitch, yaw} - the v1 FOV slot is
-//                                                now a pitch angle, so no FOV hook is installed (would tilt camera)
+//                                                hook at +0x8, xmm9 (was -0xE, xmm8). The v1-style FOV hook stays
+//                                                uninstalled here (v2's camera message is {id, dist, pitch, yaw} -
+//                                                the v1 FOV slot is now a pitch angle, hooking it would tilt the
+//                                                camera); the FOV multiplier is instead delivered by the NEW
+//                                                ViewParamsFOV hook below
+//   [NEW 2026-07-10] ViewParamsFOV (AspectFOVFix) - gameplay FOV multiplier at the view-params consumer site
+//                                                (expected RVA 0x0075109A, hook at pattern+0x20 right after
+//                                                "vmovss xmm3,[rax+0x9D4]" loads the FOV): xmm3 *= fFOVMulti.
+//                                                Derived from independent analysis of the v2.0.2 exe (build
+//                                                0x6A3E573A), cross-validated against community ultrawide
+//                                                research. Replaces the dead v1-style GameplayCamera FOV path.
+//   [NEW 2026-07-10] Nameplate    (NameplateFix) - world-anchored nameplate horizontal scale (expected RVA
+//                                                0x00847F6B, hook at pattern+0x3C right after "vdivss
+//                                                xmm1,xmm7,[rax+0x9D0]"): xmm1 = xmm7 / live fAspectRatio.
+//                                                Derived from independent analysis of the v2.0.2 exe.
 //   [REFOUND v2.0.2] LODDistance (GraphicalTweaks) - v1 site compiled away; semantically relocated to the
 //                                                per-object LOD threshold loop (unique hit RVA 0x020E56C0),
 //                                                hook +0x0 -> +0x8 (after the 8-byte vdivss), xmm1 -> xmm2.
@@ -69,8 +87,9 @@
 //                                                vucomisd+pause. New pattern @ RVA 0x001B6E63; hook +0x5 -> +0xC
 //                                                (must be after the vmovsd), xmm6 -> xmm10
 //
-// MISS on v2.0.2: none - all 15 patterns relocated. The one intentionally unsupported feature is
-// the GameplayCamera FOV multiplier (see PARTIAL note above).
+// MISS on v2.0.2: none - all 15 v1 patterns relocated, plus 2 new v2-native patterns
+// (ViewParamsFOV, Nameplate). The gameplay FOV multiplier, previously unsupported, is now served
+// by ViewParamsFOV; only the <16:9 vert- FOV compensation remains unported.
 // =====================================
 
 #include "stdafx.h"
@@ -83,7 +102,7 @@ HMODULE baseModule = GetModuleHandle(NULL);
 // Logger and config setup
 inipp::Ini<char> ini;
 std::string sFixName = "GBFRUltrawide";
-std::string sFixVer = "0.1.1";
+std::string sFixVer = "0.2.0";
 std::string sLogFile = "GBFRUltrawide.log";
 std::string sConfigFile = "GBFRUltrawide.ini";
 std::string sExeName;
@@ -102,6 +121,19 @@ bool bSpanHUD;
 float fHUDAspectRatio;
 bool bSpanAllHUD;
 bool bSpanAllBackgrounds;
+#ifdef GBFR_DEVBUILD
+// [Debug - Span HUD] per-element position overrides + probe diagnostic (dev builds
+// only - release builds compile all of this out and ignore the ini section).
+// Fixed-capacity storage, filled once in ReadConfig before any hook is installed -
+// the hook reads them lock-free.
+bool bHUDProbe;
+constexpr int kMaxMoveEntries = 32;
+uint32_t uEdgeSnapIds[kMaxMoveEntries];
+int iEdgeSnapCount = 0;
+uint32_t uMoveIds[kMaxMoveEntries];
+float fMoveDeltas[kMaxMoveEntries];
+int iMoveIdCount = 0;
+#endif // GBFR_DEVBUILD
 bool bAspectFix;
 bool bFOVFix;
 bool bShadowQuality;
@@ -109,6 +141,9 @@ int iShadowQuality;
 float fLODMulti;
 bool bDisableTAA;
 bool bFPSCap;
+// Default true on purpose: existing user configs predate the [Fix Nameplates] section,
+// and inipp::get_value leaves the variable untouched when the key is missing.
+bool bFixNameplates = true;
 
 // Aspect ratio + HUD stuff
 float fNativeAspect = (float)16 / 9;
@@ -120,6 +155,13 @@ float fDefaultHUDWidth = (float)1920;
 float fDefaultHUDHeight = (float)1080;
 float fHUDWidthOffset;
 float fHUDHeightOffset;
+
+// Nameplate Fix: the game's own HUD-projection scale global (store target of the
+// Nameplate pattern's "vmovss [rip+disp32],xmm1" at +0x3C; game global RVA ~0x07194FCC).
+// Resolved at scan time in NameplateFix() from the instruction's rip-relative disp32 -
+// NEVER hardcoded. Refreshed to 1/fAspectRatio each HUDConstraints pass so the value
+// stays corrected on frames where the Nameplate site itself does not run.
+float* g_pNameplateScalar = nullptr;
 
 // Minimal thread-safe logger (spdlog replacement)
 namespace Log
@@ -212,7 +254,12 @@ void Logging()
         Log::Open(sExePath / "scripts" / sLogFile);
 
         LogInfo("----------");
+#ifdef GBFR_DEVBUILD
+        LogInfo("%s v%s loaded. (dev)", sFixName.c_str(), sFixVer.c_str());
+        LogInfo("Development build: [Debug - Span HUD] ini section is active (Probe / EdgeSnapIds / MoveIds).");
+#else
         LogInfo("%s v%s loaded.", sFixName.c_str(), sFixVer.c_str());
+#endif
         LogInfo("----------");
         LogInfo("Path to logfile: %s", (sExePath.string() + "scripts\\" + sLogFile).c_str());
         LogInfo("----------");
@@ -264,6 +311,13 @@ void ReadConfig()
     inipp::get_value(ini.sections["Span HUD"], "AspectRatio", fHUDAspectRatio);
     inipp::get_value(ini.sections["Span HUD"], "SpanAllHUD", bSpanAllHUD);
     inipp::get_value(ini.sections["Span HUD"], "SpanAllBackgrounds", bSpanAllBackgrounds);
+#ifdef GBFR_DEVBUILD
+    inipp::get_value(ini.sections["Debug - Span HUD"], "Probe", bHUDProbe);
+    std::string sEdgeSnapIds;
+    std::string sMoveIds;
+    inipp::get_value(ini.sections["Debug - Span HUD"], "EdgeSnapIds", sEdgeSnapIds);
+    inipp::get_value(ini.sections["Debug - Span HUD"], "MoveIds", sMoveIds);
+#endif // GBFR_DEVBUILD
     inipp::get_value(ini.sections["Fix Aspect Ratio"], "Enabled", bAspectFix);
     inipp::get_value(ini.sections["Fix FOV"], "Enabled", bFOVFix);
     inipp::get_value(ini.sections["Shadow Quality"], "Enabled", bShadowQuality);
@@ -271,6 +325,7 @@ void ReadConfig()
     inipp::get_value(ini.sections["Level of Detail"], "Multiplier", fLODMulti);
     inipp::get_value(ini.sections["Disable TAA"], "Enabled", bDisableTAA);
     inipp::get_value(ini.sections["Raise Framerate Cap"], "Enabled", bFPSCap);
+    inipp::get_value(ini.sections["Fix Nameplates"], "Enabled", bFixNameplates);
 
     // Log config parse
     LogInfo("Config Parse: iInjectionDelay: %dms", iInjectionDelay);
@@ -294,6 +349,71 @@ void ReadConfig()
     LogInfo("Config Parse: fHUDAspectRatio: %g", fHUDAspectRatio);
     LogInfo("Config Parse: bSpanAllHUD: %s", bSpanAllHUD ? "true" : "false");
     LogInfo("Config Parse: bSpanAllBackgrounds: %s", bSpanAllBackgrounds ? "true" : "false");
+#ifdef GBFR_DEVBUILD
+    LogInfo("Config Parse: bHUDProbe: %s", bHUDProbe ? "true" : "false");
+
+    // EdgeSnapIds = 123,456 - comma-separated element ids. Any non-digit run acts as
+    // a separator; entries beyond the fixed capacity are dropped with a warning.
+    {
+        const char* p = sEdgeSnapIds.c_str();
+        while (*p)
+        {
+            if (iEdgeSnapCount >= kMaxMoveEntries)
+            {
+                LogWarn("Config Parse: EdgeSnapIds: more than %d ids, extra entries ignored", kMaxMoveEntries);
+                break;
+            }
+            char* end = nullptr;
+            unsigned long v = strtoul(p, &end, 10);
+            if (end == p) { ++p; continue; }
+            uEdgeSnapIds[iEdgeSnapCount++] = (uint32_t)v;
+            p = end;
+        }
+        LogInfo("Config Parse: EdgeSnapIds: %d id(s)", iEdgeSnapCount);
+        for (int i = 0; i < iEdgeSnapCount; ++i)
+            LogInfo("Config Parse: EdgeSnapIds[%d] = %u", i, uEdgeSnapIds[i]);
+    }
+
+    // MoveIds = 123:660,456:-660 - comma-separated id:deltaX pairs (delta in canvas
+    // units, 3840x2160 space). Malformed pairs are skipped with a warning.
+    {
+        const char* p = sMoveIds.c_str();
+        while (*p)
+        {
+            if (iMoveIdCount >= kMaxMoveEntries)
+            {
+                LogWarn("Config Parse: MoveIds: more than %d pairs, extra entries ignored", kMaxMoveEntries);
+                break;
+            }
+            char* end = nullptr;
+            unsigned long id = strtoul(p, &end, 10);
+            if (end == p) { ++p; continue; }
+            p = end;
+            while (*p == ' ' || *p == '\t') ++p;
+            if (*p != ':')
+            {
+                LogWarn("Config Parse: MoveIds: id %lu has no ':deltaX' - entry skipped", id);
+                while (*p && *p != ',') ++p;
+                continue;
+            }
+            ++p;
+            float delta = strtof(p, &end);
+            if (end == p)
+            {
+                LogWarn("Config Parse: MoveIds: id %lu has an unreadable deltaX - entry skipped", id);
+                while (*p && *p != ',') ++p;
+                continue;
+            }
+            p = end;
+            uMoveIds[iMoveIdCount] = (uint32_t)id;
+            fMoveDeltas[iMoveIdCount] = delta;
+            ++iMoveIdCount;
+        }
+        LogInfo("Config Parse: MoveIds: %d pair(s)", iMoveIdCount);
+        for (int i = 0; i < iMoveIdCount; ++i)
+            LogInfo("Config Parse: MoveIds[%d] = %u -> %+g", i, uMoveIds[i], fMoveDeltas[i]);
+    }
+#endif // GBFR_DEVBUILD
     LogInfo("Config Parse: bAspectFix: %s", bAspectFix ? "true" : "false");
     LogInfo("Config Parse: bFOVFix: %s", bFOVFix ? "true" : "false");
     LogInfo("Config Parse: bShadowQuality: %s", bShadowQuality ? "true" : "false");
@@ -311,6 +431,7 @@ void ReadConfig()
     }
     LogInfo("Config Parse: bDisableTAA: %s", bDisableTAA ? "true" : "false");
     LogInfo("Config Parse: bFPSCap: %s", bFPSCap ? "true" : "false");
+    LogInfo("Config Parse: bFixNameplates: %s", bFixNameplates ? "true" : "false");
 
     // Calculate aspect ratio / use desktop res instead
     DesktopDimensions = Util::GetPhysicalDesktopDimensions();
@@ -661,6 +782,48 @@ void GraphicalFixes()
 
 void AspectFOVFix()
 {
+    // [NEW 2026-07-10] ViewParamsFOV - gameplay FOV multiplier, derived from independent
+    // analysis of the v2.0.2 exe (build 0x6A3E573A), cross-validated against community
+    // ultrawide research.
+    //
+    // Pattern = the four adjacent view-params loads (viewport W/H, aspect, FOV):
+    //   +0x00 vmovss xmm0,[rax+0x9A0]   ; viewport width
+    //   +0x08 vmovss xmm1,[rax+0x9A4]   ; viewport height
+    //   +0x10 vmovss xmm2,[rax+0x9D0]   ; aspect
+    //   +0x18 vmovss xmm3,[rax+0x9D4]   ; FOV -> xmm3
+    //   +0x20 vmovss [rsp+0x40],xmm11   ; <- hook here (after the FOV load)
+    // Expected unique hit RVA 0x0075109A. Hook at +0x20: xmm3 *= fFOVMulti - pure linear
+    // multiply, register only, no gating (no tan(), no cutscene exclusion, no aspect
+    // condition). Confidence: HIGH (site disasm verified against this exe).
+    //
+    // NO hook is added at pattern+0x10 (the alternative aspect-force spot): our
+    // AspectRatio hook below already force-writes [viewParams+0x9D0] = fAspectRatio at
+    // this very site BEFORE the +0x10 load executes - duplicating the write here would
+    // be redundant.
+    //
+    // ORDERING IS LOAD-BEARING: this pattern starts at RVA 0x0075109A - the exact
+    // address the AspectRatio mid-hook below is installed at - and the AspectRatio
+    // pattern (RVA 0x00751089, 0x37 bytes) also spans our +0x20 hook site. Installing
+    // either mid-hook rewrites bytes inside the other's pattern (trampoline jmp), so
+    // BOTH scans must complete before EITHER hook is installed. Scan here, install
+    // after the AspectRatio hook below.
+    uint8_t* ViewParamsFOVScanResult = nullptr;
+    if (fFOVMulti != (float)1)
+    {
+        std::vector<uint8_t*> ViewParamsFOVHits = Memory::PatternScanAll(baseModule, "C5 ?? ?? ?? A0 09 00 00 C5 ?? ?? ?? A4 09 00 00 C5 ?? ?? ?? D0 09 00 00 C5 ?? ?? ?? D4 09 00 00");
+        if (!ViewParamsFOVHits.empty())
+        {
+            if (ViewParamsFOVHits.size() != 1)
+                LogError("WARN: ViewParamsFOV: expected unique hit, found %zu - hooking the first only", ViewParamsFOVHits.size());
+            ViewParamsFOVScanResult = ViewParamsFOVHits[0];
+            LogInfo("HIT: ViewParamsFOV: %s+0x%llx (hook at +0x20, multiplier %g)", sExeName.c_str(), ModOffset(ViewParamsFOVScanResult), fFOVMulti);
+        }
+        else
+        {
+            LogError("MISS: ViewParamsFOV pattern not found - gameplay FOV multiplier disabled");
+        }
+    }
+
     if (bAspectFix)
     {
         // [REFOUND v2.0.2] Aspect Ratio: only change vs v1 is byte[2] 49 -> 48 - v1's
@@ -717,6 +880,23 @@ void AspectFOVFix()
         }
     }
 
+    // ViewParamsFOV install (scan done above, before the AspectRatio hook rewrote the
+    // site bytes). Only installed when fFOVMulti != 1.0 - at 1.0 the multiply is a no-op.
+    if (ViewParamsFOVScanResult)
+    {
+        static SafetyHookMid ViewParamsFOVMidHook{};
+        ViewParamsFOVMidHook = safetyhook::create_mid(ViewParamsFOVScanResult + 0x20,
+            [](SafetyHookContext& ctx)
+            {
+                static std::atomic<bool> logged{ false };
+                if (!logged.exchange(true)) LogInfo("FIRED: ViewParamsFOV (base FOV %g x%g)", ctx.xmm3.f32[0], fFOVMulti);
+
+                // FOV was just loaded from [viewParams+0x9D4] into xmm3; every downstream
+                // consumer sees the scaled value, game memory stays unmodified.
+                ctx.xmm3.f32[0] *= fFOVMulti;
+            });
+    }
+
     // [REFOUND v2.0.2 - PARTIAL] Gameplay Camera: the v1 pattern died because the sender
     // switched to an rbp frame (5-byte stores, was 6-byte rsp+SIB) and hoisted
     // "mov rax,[rsi+0x4358]" above the float loads. The new pattern anchors the three
@@ -750,13 +930,11 @@ void AspectFOVFix()
                 }
             });
 
-        // No gameplay FOV hook on v2.0.2 (see block comment above) - surface the
-        // limitation instead of silently ignoring the user's settings. bFOVFix only ever
-        // acted on gameplay FOV at <16:9, so wider-than-16:9 users are not warned.
-        if (fFOVMulti != (float)1)
-        {
-            LogWarn("Gameplay FOV multiplier is NOT SUPPORTED on game v2.0.2 (the camera message no longer carries FOV) - setting ignored");
-        }
+        // No v1-style FOV hook at THIS site on v2.0.2 (see block comment above) - the
+        // gameplay FOV multiplier is now delivered by the ViewParamsFOV hook installed
+        // earlier in this function instead. What remains unported is bFOVFix's <16:9
+        // vert- compensation (v1 divided the camera-message FOV by fAspectMultiplier);
+        // the ViewParamsFOV hook is a plain multiplier with no aspect term.
         if (bFOVFix && (fAspectRatio < fNativeAspect))
         {
             LogWarn("Gameplay FOV vert- compensation is NOT SUPPORTED on game v2.0.2 (the camera message no longer carries FOV) - gameplay FOV stays uncorrected below 16:9");
@@ -908,6 +1086,18 @@ void HUDFix()
 
         // [FIXED v2.0.2] Span backgrounds - struct offsets shifted -0x38, width now in xmm1,
         // <16:9 hook moved base+0x28 -> base+0x29 (v1 offset landed inside the 8-byte vmovss xmm4,[rax+0x1C0])
+        //
+        // [CROSS-VERIFIED 2026-07-10 against community ultrawide research for this exe
+        //  build 0x6A3E573A]
+        // - ID lists match exactly: width 12 IDs (incl. main-menu bg 2384707215), height
+        //   11 IDs (= width list minus dialogue bg 2454207042). No changes needed.
+        // - Formulas match: width path gates on [obj+0x1BC]==3840 and writes
+        //   xmm1 = 2160*fAspectRatio; height path writes xmm4 = 3840/fAspectRatio;
+        //   bSpanAllBackgrounds override (w==3840 && h==2160) writes 2160*fHUDAspectRatio.
+        // - Hook offsets: width at pattern+0x2F (our base). A height hook at pattern+0x57
+        //   would land MID-INSTRUCTION in this exe (an off-by-one seen in the wild, never
+        //   exercised - it only installs at <16:9); the correct post-load boundary is
+        //   pattern+0x58 = our base+0x29, which is what we already use. KEEP base+0x29.
         uint8_t* UIBackgroundsScanResult = Memory::PatternScan(baseModule, "41 ?? ?? ?? ?? 00 E8 ?? ?? ?? ?? 80 ?? ?? ?? 00 0F ?? ?? ?? ?? ?? 48 ?? ?? ?? ?? 48 ?? ?? E8 ?? ?? ?? ?? 48 ?? ?? ?? C5 ?? ?? ?? ?? ?? ?? 00");
         if (UIBackgroundsScanResult)
         {
@@ -997,13 +1187,61 @@ void HUDFix()
 
     if (bSpanHUD)
     {
-        // [FIXED v2.0.2] Spanned HUD - hook offset and xmm registers unchanged
-        // (xmm2 = width from [rax+0x1BC], xmm0 = height from [rax+0x1C0]);
-        // lambda struct offsets shifted -0x38 for the v2.0.2 UI object layout.
+        // [REWORKED 2026-07-10] Span HUD - three-layer menu/story filter, derived from
+        // independent analysis of the v2.0.2 exe (build 0x6A3E573A) and cross-validated
+        // against community ultrawide research.
+        //
+        // Site (pattern hit RVA 0x0261C638, hook at +0x1C - both unchanged since v1):
+        //   +0x00 mov   rax,[rcx+0x108]      ; rcx = child element, rax = parent canvas
+        //   +0x07 test  rax,rax / jz +0x26   ; jz jumps PAST +0x1C, so parent != null here
+        //   +0x0C vmovss xmm2,[rax+0x1BC]    ; parent width  (3840 on a full canvas)
+        //   +0x14 vmovss xmm0,[rax+0x1C0]    ; parent height (2160 on a full canvas)
+        //   +0x1C vmovsd xmm1,[rax+0x194]    ; <<== hook here
+        // Child struct (v2.0.2 layout, -0x38 vs v1): +0x19C px.x | +0x1A4 anchorA.x |
+        // +0x1AC anchorB.x | +0x1BC w | +0x1C0 h | +0x1C4 id.
+        //
+        // Why the rewrite: the previous body was Lyall's v1 ID-gated logic - none of the
+        // v1 object IDs ever appear on v2.0.2, and +0x194/+0x198 are normalized anchors,
+        // not pixel offsets, so it was inert (ADR-0006 appendix). Replaced with logic
+        // field-tested on this exact exe build:
+        //   (A) refresh the game's nameplate scale global (see NameplateFix)
+        //   (B) EdgeSnapIds / MoveIds (dev builds only): ini-driven per-child-id px.x
+        //       overrides, applied BEFORE any blocklist decision so specific menu
+        //       elements (e.g. corner button prompts) can be pushed to the true screen
+        //       edge. Position only. Compiled out of release builds.
+        //   (C) Combat Prompts recenter: children of host 2939675107 with 0.5/0.5 anchors
+        //       and |px.x| >= 1600 -> px.x = capturedBase * fAspectMultiplier (wide only)
+        //   (D) gameplay HUD root 1719602056: widen unconditionally
+        //   (E) SpanAllHUD "register mode": widen every full-canvas (3840x2160) parent,
+        //       EXCEPT fixed-anchor children of menu/story containers. Three block layers:
+        //       parent id in kSpanHudBlocklist, parent id in the transitive menuTree
+        //       (seeded with 3 menu roots; a marked parent marks its children on sight;
+        //       never cleared), or child id in kSpanHudChildBlock. Stretch-anchored
+        //       children (anchorA.x != anchorB.x) are widened even inside menus.
+        // Widen writes are REGISTER-ONLY (wide: xmm2 = 2160*fHUDAspectRatio, narrow:
+        // xmm0 = 3840/fHUDAspectRatio) - no struct memory is touched in the widen paths,
+        // unlike the removed v1 marker-based struct writes.
+        //
+        // [Debug - Span HUD] Probe = true (dev builds only) additionally logs every
+        // unique child id that flows through here (bounded, first 200) with geometry +
+        // verdict - the workflow for discovering ids to feed into EdgeSnapIds /
+        // MoveIds. Costs one bool check when disabled; release builds compile the
+        // whole probe machinery out (probeLog becomes a no-op).
+        //
+        // Interaction with UIMarkersCanvas (ADR-0006): that hook rewrites the GLOBAL
+        // canvas manager's source/current width to 2160*fAspectRatio. If the manager
+        // object itself ever flows through this site as "parent", its width is no longer
+        // 3840 and the full-canvas gate here simply skips it - which is correct either
+        // way, the root is already widened. The intended targets of this gate are the 41
+        // named 3840x2160 canvases, whose own W/H the ADR-0006 fix leaves untouched.
+        //
+        // Confidence: HIGH on site semantics (verified disasm, runtime-tested on this
+        // build); MEDIUM on ID-list completeness - hence the span diagnostics
+        // below, which name the first 20 unique widened child ids for post-test triage.
         uint8_t* HUDConstraintsScanResult = Memory::PatternScan(baseModule, "48 ?? ?? ?? ?? ?? 00 48 ?? ?? 74 ?? C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 EB ??");
         if (HUDConstraintsScanResult)
         {
-            HUDConstraintsScanResult += 0x1C; // hook offset (Lyall: pattern + 0x1C)
+            HUDConstraintsScanResult += 0x1C; // hook offset (same as Lyall's v1: pattern + 0x1C)
             LogInfo("HIT: HUDConstraints: %s+0x%llx", sExeName.c_str(), ModOffset(HUDConstraintsScanResult));
 
             static SafetyHookMid HUDConstraintsMidHook{};
@@ -1013,67 +1251,275 @@ void HUDFix()
                     static std::atomic<bool> logged{ false };
                     if (!logged.exchange(true)) LogInfo("FIRED: HUDConstraints");
 
-                    // NOTE (2026-07-10 diagnostic): none of the three v1 object IDs below
-                    // appeared among the 60+ unique IDs observed flowing through this hook
-                    // on v2.0.2, and +0x194/+0x198 read as normalized anchors (0.5), not
-                    // pixel offsets. The ID-gated writes below are almost certainly inert
-                    // on v2 and need a re-hunt if Span HUD misbehaves. (ADR-0006 appendix)
+                    uint8_t* child = reinterpret_cast<uint8_t*>(ctx.rcx);
+                    uint8_t* parent = reinterpret_cast<uint8_t*>(ctx.rax);
+                    // The site's test/jz at +0x07 jumps past +0x1C when rax is null, so
+                    // parent is non-null whenever this runs; the check is defensive only.
+                    if (!child || !parent)
+                        return;
 
-                    // Gameplay HUD = 1719602056
-                    if (*reinterpret_cast<int*>(ctx.rax + 0x1C4) == (int)1719602056)
+                    const uint32_t parentId = *reinterpret_cast<uint32_t*>(parent + 0x1C4);
+                    const uint32_t childId = *reinterpret_cast<uint32_t*>(child + 0x1C4);
+
+#ifdef GBFR_DEVBUILD
+                    // Probe diagnostic ([Debug - Span HUD] Probe, dev builds only): one
+                    // greppable line per unique child id (first 200), logged at the point
+                    // the verdict for this pass is known. Dedup means each id gets its
+                    // FIRST verdict only. A single bool check when disabled.
+                    auto probeLog = [&](const char* verdict)
                     {
-                        // Span
-                        if (fAspectRatio > fNativeAspect)
+                        if (!bHUDProbe)
+                            return;
+                        static std::mutex probeMtx;
+                        static uint32_t probeSeen[200];
+                        static int probeCount = 0;
+
+                        std::lock_guard<std::mutex> lock(probeMtx);
+                        for (int i = 0; i < probeCount; ++i)
                         {
+                            if (probeSeen[i] == childId) return;
+                        }
+                        if (probeCount >= 200)
+                            return;
+                        probeSeen[probeCount++] = childId;
+                        LogInfo("PROBE: parent=%u child=%u wh=%gx%g anchors=%g/%g px=%g verdict=%s",
+                            parentId, childId,
+                            *reinterpret_cast<float*>(child + 0x1BC),
+                            *reinterpret_cast<float*>(child + 0x1C0),
+                            *reinterpret_cast<float*>(child + 0x1A4),
+                            *reinterpret_cast<float*>(child + 0x1AC),
+                            *reinterpret_cast<float*>(child + 0x19C), verdict);
+                    };
+#else
+                    // Release: no probe machinery. The inline no-op keeps the verdict
+                    // call sites below readable and lets the optimizer discard them.
+                    auto probeLog = [](const char*) {};
+#endif // GBFR_DEVBUILD
+
+                    // (A) keep the game's nameplate scale global corrected on frames
+                    // where the Nameplate hook's own site does not execute.
+                    if (bFixNameplates && g_pNameplateScalar && fAspectRatio > fNativeAspect)
+                        *g_pNameplateScalar = 1.0f / fAspectRatio;
+
+#ifdef GBFR_DEVBUILD
+                    // (B) EdgeSnapIds / MoveIds (wide only, dev builds only): ini-driven
+                    // per-id px.x overrides, applied BEFORE any blocklist/menuTree
+                    // decision so even menu children kept at 16:9 can be pushed to the
+                    // true screen edge.
+                    // Position only - the widen registers are never touched here.
+                    // Same capture-base-then-rewrite style as the Combat Prompts map:
+                    //   MoveIds     : px.x = base + explicit deltaX (overrides EdgeSnapIds)
+                    //   EdgeSnapIds : px.x = base + sign(base) * (2160*fHUDAspectRatio - 3840)/2
+                    //                 (the canvas half-widening delta; right-side elements
+                    //                 move right, left-side ones left). A base of ~0 gives
+                    //                 no side to push toward - left unchanged, warned once.
+                    if (fAspectRatio > fNativeAspect && (iMoveIdCount > 0 || iEdgeSnapCount > 0))
+                    {
+                        bool bMatched = false;
+                        bool bEdgeSnap = false;
+                        float fMoveDelta = 0.0f;
+                        for (int i = 0; i < iMoveIdCount; ++i)
+                        {
+                            if (uMoveIds[i] == childId) { bMatched = true; fMoveDelta = fMoveDeltas[i]; break; }
+                        }
+                        if (!bMatched)
+                        {
+                            for (int i = 0; i < iEdgeSnapCount; ++i)
+                            {
+                                if (uEdgeSnapIds[i] == childId) { bMatched = true; bEdgeSnap = true; break; }
+                            }
+                        }
+                        if (bMatched)
+                        {
+                            static std::mutex moveMtx;
+                            static uint32_t moveIds[kMaxMoveEntries * 2];
+                            static float moveBase[kMaxMoveEntries * 2];
+                            static int moveCount = 0;
+
+                            std::lock_guard<std::mutex> lock(moveMtx);
+                            float fPxX = *reinterpret_cast<float*>(child + 0x19C);
+                            int idx = -1;
+                            for (int i = 0; i < moveCount; ++i)
+                            {
+                                if (moveIds[i] == childId) { idx = i; break; }
+                            }
+                            if (idx < 0 && moveCount < kMaxMoveEntries * 2)
+                            {
+                                idx = moveCount++;
+                                moveIds[idx] = childId;
+                                moveBase[idx] = fPxX; // one-shot base capture
+                                if (bEdgeSnap && fabsf(fPxX) < 1.0f)
+                                    LogWarn("FIRED: HUDConstraints EdgeSnap id=%u base px.x=%g is ~0 - side unknown, left unchanged", childId, fPxX);
+                                else
+                                    LogInfo("FIRED: HUDConstraints %s id=%u base px.x=%g", bEdgeSnap ? "EdgeSnap" : "MoveIds", childId, fPxX);
+                            }
+                            if (idx >= 0)
+                            {
+                                float fBase = moveBase[idx];
+                                if (bEdgeSnap)
+                                {
+                                    if (fabsf(fBase) >= 1.0f)
+                                    {
+                                        float fSnapDelta = ((float)2160 * fHUDAspectRatio - (float)3840) * 0.5f;
+                                        *reinterpret_cast<float*>(child + 0x19C) = fBase + (fBase > 0.0f ? fSnapDelta : -fSnapDelta); // struct write [child+0x19C]
+                                        probeLog("edgesnap");
+                                    }
+                                    // |base| < 1: no write (warned once at capture)
+                                }
+                                else
+                                {
+                                    *reinterpret_cast<float*>(child + 0x19C) = fBase + fMoveDelta; // struct write [child+0x19C]
+                                    probeLog("move");
+                                }
+                            }
+                        }
+                    }
+#endif // GBFR_DEVBUILD
+
+                    // (C) Combat Prompts recenter (wide only): centered-anchor children of
+                    // the combat-prompt host sitting >= 1600px out get their base px.x
+                    // captured once, then rescaled by fAspectMultiplier every pass.
+                    if (fAspectRatio > fNativeAspect && parentId == 2939675107u)
+                    {
+                        float fAnchorAx = *reinterpret_cast<float*>(child + 0x1A4);
+                        float fAnchorBx = *reinterpret_cast<float*>(child + 0x1AC);
+                        float fPxX = *reinterpret_cast<float*>(child + 0x19C);
+                        if (fAnchorAx == 0.5f && fAnchorBx == 0.5f && fabsf(fPxX) >= 1600.0f)
+                        {
+                            static std::mutex promptMtx;
+                            static uint32_t promptIds[16];
+                            static float promptBase[16];
+                            static int promptCount = 0;
+
+                            std::lock_guard<std::mutex> lock(promptMtx);
+                            int idx = -1;
+                            for (int i = 0; i < promptCount; ++i)
+                            {
+                                if (promptIds[i] == childId) { idx = i; break; }
+                            }
+                            if (idx < 0 && promptCount < 16)
+                            {
+                                idx = promptCount++;
+                                promptIds[idx] = childId;
+                                promptBase[idx] = fPxX; // one-shot base capture
+                                LogInfo("FIRED: HUDConstraints combat prompt id=%u px.x %g -> %g (x%g)",
+                                    childId, fPxX, fPxX * fAspectMultiplier, fAspectMultiplier);
+                            }
+                            if (idx >= 0)
+                            {
+                                *reinterpret_cast<float*>(child + 0x19C) = promptBase[idx] * fAspectMultiplier; // struct write [child+0x19C]
+                                probeLog("prompt-recenter");
+                            }
+                        }
+                    }
+
+                    // (D) gameplay HUD root: span unconditionally. This is the one v1 id
+                    // community research still carries for this exe build; our 2026-07-10
+                    // diagnostic never saw it, so it may be dead - harmless if absent, and
+                    // the one-shot log tells us if it is alive after all.
+                    if (parentId == 1719602056u)
+                    {
+                        static std::atomic<bool> rootLogged{ false };
+                        if (!rootLogged.exchange(true)) LogInfo("FIRED: HUDConstraints gameplay HUD root matched - spanning to %g", (float)2160 * fHUDAspectRatio);
+
+                        if (fAspectRatio > fNativeAspect)
                             ctx.xmm2.f32[0] = (float)2160 * fHUDAspectRatio;
-                        }
                         else if (fAspectRatio < fNativeAspect)
-                        {
                             ctx.xmm0.f32[0] = (float)3840 / fHUDAspectRatio;
+                        probeLog("widen-root");
+                    }
+
+                    // (E) SpanAllHUD register mode with the three-layer filter
+                    if (!bSpanAllHUD)
+                    {
+                        probeLog("skip-spanallhud-off");
+                        return;
+                    }
+
+                    // menuTree: transitive menu-subtree marking. If the parent is marked,
+                    // mark the child. Seeds = the three menu-root ids identified for this
+                    // exe build. Grows for the process lifetime; NEVER cleared (intentional).
+                    bool bInMenuTree;
+                    {
+                        static std::mutex menuMtx;
+                        static std::unordered_set<uint32_t> menuTree = { 1465589452u, 141651223u, 584127281u };
+                        std::lock_guard<std::mutex> lock(menuMtx);
+                        bInMenuTree = menuTree.count(parentId) != 0;
+                        if (bInMenuTree)
+                            menuTree.insert(childId);
+                    }
+
+                    // Parent-id blocklist (story/menu containers) + child-id blocklist.
+                    static const uint32_t kSpanHudBlocklist[8] = {
+                        1579537302u, 584127281u, 141651223u, 3723338869u,
+                        2229826448u, 1465589452u, 2464430819u, 368881640u };
+                    static const uint32_t kSpanHudChildBlock[3] = { 3646400251u, 3659745599u, 178979338u };
+
+                    const char* blockReason = bInMenuTree ? "skip-menutree" : nullptr;
+                    if (!blockReason)
+                    {
+                        for (uint32_t id : kSpanHudBlocklist)
+                        {
+                            if (parentId == id) { blockReason = "skip-blocklist"; break; }
                         }
                     }
-                    // Guard & Lock-On
-                    if (*reinterpret_cast<int*>(ctx.rax + 0x1C4) == (int)605904162)
+                    if (!blockReason)
                     {
-                        // Offset
-                        if (fAspectRatio > fNativeAspect)
+                        for (uint32_t id : kSpanHudChildBlock)
                         {
-                            *reinterpret_cast<float*>(ctx.rax + 0x194) = (float)-(((2160 * fHUDAspectRatio) - 3840) / 2);
-                        }
-                        else if (fAspectRatio < fNativeAspect)
-                        {
-                            *reinterpret_cast<float*>(ctx.rax + 0x198) = (float)-(((3840 / fHUDAspectRatio) - 2160) / 2);
-                        }
-                    }
-                    // Dodge
-                    if (*reinterpret_cast<int*>(ctx.rax + 0x1C4) == (int)3550204025)
-                    {
-                        // Offset
-                        if (fAspectRatio > fNativeAspect)
-                        {
-                            *reinterpret_cast<float*>(ctx.rax + 0x194) = (float)(((2160 * fHUDAspectRatio) - 3840) / 2);
-                        }
-                        else if (fAspectRatio < fNativeAspect)
-                        {
-                            *reinterpret_cast<float*>(ctx.rax + 0x198) = (float)-(((3840 / fHUDAspectRatio) - 2160) / 2);
+                            if (childId == id) { blockReason = "skip-childblock"; break; }
                         }
                     }
 
-                    if (bSpanAllHUD)
+                    // A block only suppresses FIXED-ANCHOR children (anchorA.x == anchorB.x
+                    // - exact compare, NaN-safe like the site's own ucomiss); children with
+                    // stretch anchors are widened even inside menus.
+                    if (blockReason && *reinterpret_cast<float*>(child + 0x1AC) == *reinterpret_cast<float*>(child + 0x1A4))
                     {
-                        if (*reinterpret_cast<float*>(ctx.rax + 0x1BC) == (float)3840 && *reinterpret_cast<float*>(ctx.rax + 0x1C0) == (float)2160 && *reinterpret_cast<int*>(ctx.rax + 0x1C8) != (int)1234)
+                        probeLog(blockReason);
+                        return;
+                    }
+
+                    // Only widen full-canvas parents (w==3840 && h==2160, exact compare).
+                    if (*reinterpret_cast<float*>(parent + 0x1BC) != (float)3840 ||
+                        *reinterpret_cast<float*>(parent + 0x1C0) != (float)2160)
+                    {
+                        probeLog("skip-not-fullcanvas");
+                        return;
+                    }
+
+                    if (fAspectRatio > fNativeAspect)
+                        ctx.xmm2.f32[0] = (float)2160 * fHUDAspectRatio;   // register-only: parent width
+                    else if (fAspectRatio < fNativeAspect)
+                        ctx.xmm0.f32[0] = (float)3840 / fHUDAspectRatio;   // register-only: parent height
+                    else
+                        return; // exactly 16:9 - nothing widened, skip diagnostics
+                    probeLog("widen");
+
+                    // Diagnostics: count widened children and log the first 20 unique ids
+                    // (parent id, child id, child w/h) for post-test triage of bad ids.
+                    {
+                        static std::mutex diagMtx;
+                        static uint32_t seenIds[64];
+                        static int seenCount = 0;
+                        static int uniqueWidened = 0;
+
+                        std::lock_guard<std::mutex> lock(diagMtx);
+                        bool bSeen = false;
+                        for (int i = 0; i < seenCount; ++i)
                         {
-                            // Span
-                            if (fAspectRatio > fNativeAspect)
-                            {
-                                *reinterpret_cast<float*>(ctx.rax + 0x1BC) = (float)2160 * fHUDAspectRatio;
-                            }
-                            else if (fAspectRatio < fNativeAspect)
-                            {
-                                *reinterpret_cast<float*>(ctx.rax + 0x1C0) = (float)3840 / fHUDAspectRatio;
-                            }
-                            // Write marker
-                            *reinterpret_cast<int*>(ctx.rax + 0x1C8) = (int)1234;
+                            if (seenIds[i] == childId) { bSeen = true; break; }
+                        }
+                        if (!bSeen)
+                        {
+                            ++uniqueWidened;
+                            if (seenCount < 64)
+                                seenIds[seenCount++] = childId;
+                            if (uniqueWidened <= 20)
+                                LogInfo("FIRED: HUDConstraints span #%d: parent=%u child=%u child %gx%g",
+                                    uniqueWidened, parentId, childId,
+                                    *reinterpret_cast<float*>(child + 0x1BC),
+                                    *reinterpret_cast<float*>(child + 0x1C0));
                         }
                     }
                 });
@@ -1082,6 +1528,84 @@ void HUDFix()
         {
             LogError("MISS: HUDConstraints pattern not found - feature disabled");
         }
+    }
+}
+
+void NameplateFix()
+{
+    // [NEW 2026-07-10] Nameplate Fix - derived from independent analysis of the v2.0.2
+    // exe (build 0x6A3E573A), cross-validated against community ultrawide research.
+    //
+    // Site (expected unique hit RVA 0x00847F6B; long, fully concrete pattern):
+    //   +0x00 mov rcx,[rax+0x60]
+    //   +0x04 vmovss xmm1,[rcx+0x9A0]        ; width
+    //   +0x0C vmovss [g_hudW],xmm1           ; rip-relative game global
+    //   +0x14 mov rcx,[rax+0x60]
+    //   +0x18 vmovss xmm1,[rcx+0x9A4]        ; height
+    //   +0x20 vmovss [g_hudH],xmm1
+    //   +0x28 mov rax,[rax+0x60]
+    //   +0x2C vmovss xmm7,[g_scale]          ; game global, ~1.0
+    //   +0x34 vdivss xmm1,xmm7,[rax+0x9D0]   ; xmm1 = scale / hudProjectionAspect
+    //   +0x3C vmovss [g_npScale],xmm1        ; <<== hook here (pattern+0x3C), before the store
+    // Hook: xmm1 = (xmm7 != 0 ? xmm7 : 1.0) / fAspectRatio - divide by the LIVE screen
+    // aspect (NOT 1.7778): [rax+0x9D0] is the HUD-projection aspect that our other hooks
+    // force/alter, so re-deriving the quotient from the true aspect re-projects
+    // world-anchored nameplates correctly. Register-only; the site's own store then
+    // publishes the corrected value to the game's scale global.
+    //
+    // g_pNameplateScalar: the store target at +0x3C, resolved from the instruction's own
+    // rip-relative disp32 at scan time (never hardcoded; byte-checked first). The Span
+    // HUD hook refreshes it to 1/fAspectRatio every pass so the value stays corrected on
+    // frames where this site does not run.
+    //
+    // Install gates: bFixNameplates ([Fix Nameplates] Enabled) AND fAspectRatio > 16:9.
+    // Confidence: HIGH (concrete 0x3C-byte pattern, runtime-tested on this build).
+    if (!bFixNameplates)
+        return;
+    if (fAspectRatio <= fNativeAspect)
+    {
+        LogInfo("Nameplate Fix: skipped (screen not wider than 16:9)");
+        return;
+    }
+
+    uint8_t* NameplateScanResult = Memory::PatternScan(baseModule, "48 8B 48 60 C5 FA 10 89 A0 09 00 00 C5 FA 11 0D ?? ?? ?? ?? 48 8B 48 60 C5 FA 10 89 A4 09 00 00 C5 FA 11 0D ?? ?? ?? ?? 48 8B 40 60 C5 FA 10 3D ?? ?? ?? ?? C5 C2 5E 88 D0 09 00 00");
+    if (NameplateScanResult)
+    {
+        LogInfo("HIT: Nameplate: %s+0x%llx (hook at +0x3C)", sExeName.c_str(), ModOffset(NameplateScanResult));
+
+        // Resolve the game's scale global BEFORE hooking - the mid-hook rewrites the
+        // bytes at +0x3C. Expected store: C5 FA 11 0D disp32 (vmovss [rip+disp32],xmm1,
+        // 8 bytes) => target = site + 0x3C + 8 + disp32.
+        if (NameplateScanResult[0x3C] == 0xC5 && NameplateScanResult[0x3D] == 0xFA &&
+            NameplateScanResult[0x3E] == 0x11 && NameplateScanResult[0x3F] == 0x0D)
+        {
+            int32_t disp32 = *reinterpret_cast<int32_t*>(NameplateScanResult + 0x40);
+            g_pNameplateScalar = reinterpret_cast<float*>(NameplateScanResult + 0x3C + 0x8 + disp32);
+            LogInfo("Nameplate Fix: scale global cached at %s+0x%llx (Span HUD refreshes it to 1/%g = %g per pass)",
+                sExeName.c_str(), ModOffset(reinterpret_cast<uint8_t*>(g_pNameplateScalar)),
+                fAspectRatio, 1.0f / fAspectRatio);
+        }
+        else
+        {
+            LogWarn("Nameplate Fix: bytes at +0x3C are not the expected rip-relative vmovss store - per-frame refresh disabled, hook still installed");
+        }
+
+        static SafetyHookMid NameplateMidHook{};
+        NameplateMidHook = safetyhook::create_mid(NameplateScanResult + 0x3C,
+            [](SafetyHookContext& ctx)
+            {
+                static std::atomic<bool> logged{ false };
+                if (!logged.exchange(true)) LogInfo("FIRED: Nameplate (scale %g -> %g)", ctx.xmm1.f32[0], (ctx.xmm7.f32[0] == 0.0f ? 1.0f : ctx.xmm7.f32[0]) / fAspectRatio);
+
+                float fScale = ctx.xmm7.f32[0];   // the game global the site loaded at +0x2C
+                if (fScale == 0.0f)               // upstream substitutes 1.0 for exact 0
+                    fScale = 1.0f;
+                ctx.xmm1.f32[0] = fScale / fAspectRatio;
+            });
+    }
+    else
+    {
+        LogError("MISS: Nameplate pattern not found - nameplates stay mispositioned at ultrawide");
     }
 }
 
@@ -1217,6 +1741,8 @@ DWORD __stdcall Main(void*)
     Sleep(iInjectionDelay);
     GraphicalFixes();
     AspectFOVFix();
+    NameplateFix();     // before HUDFix: resolves g_pNameplateScalar, which the
+                        // HUDConstraints hook reads once it starts firing
     HUDFix();
     GraphicalTweaks();
     FPSCap();
