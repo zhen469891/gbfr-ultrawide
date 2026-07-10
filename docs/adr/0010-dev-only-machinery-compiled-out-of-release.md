@@ -48,3 +48,6 @@ debug machinery — they stay in both builds.
 - The per-element edge-extension work itself is deferred: when resumed, iterate in a dev
   build, then land confirmed ids in code (growing the blocklist/move tables of
   ADR-0007), leaving release users zero configuration surface.
+- Update 2026-07-10: the `[Debug - *]` sections were later moved out of the shipped ini
+  into a separate `GBFRUltrawide.dev.ini` (read only by dev builds), so the shipped
+  `GBFRUltrawide.ini` stays clean.
