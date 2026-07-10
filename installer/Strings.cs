@@ -245,6 +245,7 @@ namespace GBFRUltrawideSetup
             // Settings tab - fixes
             d["Config.FixHud"] = "Fix HUD (resize HUD to 16:9 and span backgrounds, fades, etc.)";
             d["Config.FixAspect"] = "Fix aspect ratio (correct the image when narrower than 16:9)";
+            d["Config.FixNameplates"] = "Fix nameplates (world-anchored nameplate position/scale when wider than 16:9)";
             d["Config.FixFov"] = "Fix FOV (correct the field of view when narrower than 16:9)";
 
             // Settings tab - Span HUD
@@ -256,13 +257,12 @@ namespace GBFRUltrawideSetup
             d["Config.SpanRatio.329"] = "32:9 (3.5556)";
             d["Config.SpanRatio.Custom"] = "Custom value…";
             d["Config.SpanCustomHint"] = "(the number on the right is used only when \"Custom value\" is selected)";
-            d["Config.SpanAllHud"] = "Span all HUD (including menus; may cause visual issues)";
+            d["Config.SpanAllHud"] = "Span all HUD (menus and story scenes are automatically kept at 16:9 by a built-in blocklist; safe to leave on)";
             d["Config.SpanAllBg"] = "Span all background images (main-menu background, etc.; may cause visual issues)";
 
             // Settings tab - camera
             d["Config.Fov"] = "Gameplay FOV multiplier:";
-            d["Config.FovUnsupported"] = "(Not supported on v2.0.2)";
-            d["Config.FovHint"] = "The game removed FOV from the camera message in v2.0.2, so this option no longer has any effect. The value is still written to the INI (harmless; the plugin ignores it and logs a WARN).";
+            d["Config.FovHint"] = "1.0 = original FOV, 1.2 = 20% higher";
             d["Config.Cam"] = "Camera distance multiplier:";
             d["Config.CamHint"] = "1.0 = original distance, 1.2 = 20% further back";
 
@@ -419,6 +419,7 @@ namespace GBFRUltrawideSetup
             // Settings tab - fixes
             d["Config.FixHud"] = "修正 HUD（將 HUD 調整為 16:9 並延伸背景漸暗等效果）";
             d["Config.FixAspect"] = "修正比例（窄於 16:9 時修正畫面比例）";
+            d["Config.FixNameplates"] = "修正名牌（寬於 16:9 時修正世界定位名牌的位置與縮放）";
             d["Config.FixFov"] = "修正 FOV（窄於 16:9 時修正視野）";
 
             // Settings tab - Span HUD
@@ -430,13 +431,12 @@ namespace GBFRUltrawideSetup
             d["Config.SpanRatio.329"] = "32:9（3.5556）";
             d["Config.SpanRatio.Custom"] = "自訂數值…";
             d["Config.SpanCustomHint"] = "（選「自訂數值」時才使用右側數字）";
-            d["Config.SpanAllHud"] = "延伸所有 HUD（含選單等，可能出現視覺問題）";
+            d["Config.SpanAllHud"] = "延伸所有 HUD（內建排除清單會讓選單、劇情畫面自動維持 16:9，建議保持開啟）";
             d["Config.SpanAllBg"] = "延伸所有背景圖（主選單背景等，可能出現視覺問題）";
 
             // Settings tab - camera
             d["Config.Fov"] = "遊玩 FOV 倍率：";
-            d["Config.FovUnsupported"] = "（v2.0.2 不支援）";
-            d["Config.FovHint"] = "遊戲在 v2.0.2 已把 FOV 從相機訊息移除，此選項不再有作用。數值仍會寫入 ini（無害，插件會忽略並記錄一筆 WARN）。";
+            d["Config.FovHint"] = "1.0 = 原始視野，1.2 = 提高 20%";
             d["Config.Cam"] = "相機距離倍率：";
             d["Config.CamHint"] = "1.0 = 原始距離，1.2 = 拉遠 20%";
 

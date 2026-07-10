@@ -16,10 +16,13 @@ namespace GBFRUltrawideSetup
     internal static class UpdateChecker
     {
         /// <summary>
-        /// Version of this bundle. MUST be kept in sync with the release tag
-        /// (minus the leading 'v') when publishing a new release.
+        /// Version of this bundle, stamped at build time by build_installer.ps1 into the
+        /// generated VersionInfo.g.cs (from -Version, i.e. the release tag minus the
+        /// leading 'v'). Local/dev builds get "0.0.0-dev", which CompareVersions ranks
+        /// below every real release, so the update notice simply points at the newest
+        /// release - no special-casing needed.
         /// </summary>
-        public const string CurrentVersion = "0.1.1";
+        public const string CurrentVersion = VersionInfo.Version;
 
         private const string ReleasesApiUrl =
             "https://api.github.com/repos/zhen469891/gbfr-ultrawide/releases?per_page=10";

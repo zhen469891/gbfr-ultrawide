@@ -46,7 +46,7 @@ namespace GBFRUltrawideSetup
         private Panel _configScroll;
         private Button _btnSaveCfg, _btnReloadCfg, _btnDefaultsCfg;
         private NumericUpDown _numDelay, _numWidth, _numHeight, _numSpanCustom, _numFov, _numCam, _numLod;
-        private CheckBox _chkResEnabled, _chkFixHud, _chkFixAspect, _chkFixFov;
+        private CheckBox _chkResEnabled, _chkFixHud, _chkFixAspect, _chkFixNameplates, _chkFixFov;
         private CheckBox _chkSpanEnabled, _chkSpanAllHud, _chkSpanAllBg;
         private ComboBox _cboSpanRatio, _cboShadow;
         private CheckBox _chkShadowEnabled, _chkDisableTaa, _chkFpsCap;
@@ -319,10 +319,12 @@ namespace GBFRUltrawideSetup
             var g = MakeGrid(1);
             _chkFixHud = MakeCheck("Config.FixHud");
             _chkFixAspect = MakeCheck("Config.FixAspect");
+            _chkFixNameplates = MakeCheck("Config.FixNameplates");
             _chkFixFov = MakeCheck("Config.FixFov");
             g.Controls.Add(_chkFixHud, 0, 0);
             g.Controls.Add(_chkFixAspect, 0, 1);
-            g.Controls.Add(_chkFixFov, 0, 2);
+            g.Controls.Add(_chkFixNameplates, 0, 2);
+            g.Controls.Add(_chkFixFov, 0, 3);
             return g;
         }
 
@@ -367,26 +369,16 @@ namespace GBFRUltrawideSetup
             var g = MakeGrid(3);
             _numFov = MakeNum(0.1m, 2.5m, 0.05m, 2);
             _numFov.Value = 1m;
-            // Not supported on v2.0.2: disable the control so users don't think it has any effect.
-            _numFov.Enabled = false;
             _numCam = MakeNum(0.1m, 2.5m, 0.05m, 2);
             _numCam.Value = 1m;
 
-            var lblFov = MakeLabel("Config.Fov");
-            g.Controls.Add(lblFov, 0, 0);
+            g.Controls.Add(MakeLabel("Config.Fov"), 0, 0);
             g.Controls.Add(_numFov, 1, 0);
-            var fovUnsupported = MakeLabel("Config.FovUnsupported");
-            fovUnsupported.ForeColor = Color.Firebrick;
-            g.Controls.Add(fovUnsupported, 2, 0);
+            g.Controls.Add(MakeHint("Config.FovHint"), 2, 0);
 
-            var fovHint = MakeHint("Config.FovHint");
-            fovHint.MaximumSize = new Size(640, 0);
-            g.Controls.Add(fovHint, 0, 1);
-            g.SetColumnSpan(fovHint, 3);
-
-            g.Controls.Add(MakeLabel("Config.Cam"), 0, 2);
-            g.Controls.Add(_numCam, 1, 2);
-            g.Controls.Add(MakeHint("Config.CamHint"), 2, 2);
+            g.Controls.Add(MakeLabel("Config.Cam"), 0, 1);
+            g.Controls.Add(_numCam, 1, 1);
+            g.Controls.Add(MakeHint("Config.CamHint"), 2, 1);
             return g;
         }
 
@@ -1236,15 +1228,15 @@ namespace GBFRUltrawideSetup
 
             _chkFixHud.Checked = _ini.GetBool("Fix HUD", "Enabled", true);
             _chkFixAspect.Checked = _ini.GetBool("Fix Aspect Ratio", "Enabled", true);
+            _chkFixNameplates.Checked = _ini.GetBool("Fix Nameplates", "Enabled", true);
             _chkFixFov.Checked = _ini.GetBool("Fix FOV", "Enabled", true);
 
             _chkSpanEnabled.Checked = _ini.GetBool("Span HUD", "Enabled", true);
             double ratio = _ini.GetDouble("Span HUD", "AspectRatio", 0.0);
             SelectSpanRatio(ratio);
-            _chkSpanAllHud.Checked = _ini.GetBool("Span HUD", "SpanAllHUD", false);
+            _chkSpanAllHud.Checked = _ini.GetBool("Span HUD", "SpanAllHUD", true);
             _chkSpanAllBg.Checked = _ini.GetBool("Span HUD", "SpanAllBackgrounds", false);
 
-            // FOV is unsupported on v2.0.2 and the control stays disabled; still load the value so it can be written back verbatim.
             SetNum(_numFov, (decimal)_ini.GetDouble("Gameplay FOV", "Multiplier", 1.0));
             SetNum(_numCam, (decimal)_ini.GetDouble("Gameplay Camera Distance", "Multiplier", 1.0));
 
@@ -1276,6 +1268,7 @@ namespace GBFRUltrawideSetup
 
                 _ini.SetBool("Fix HUD", "Enabled", _chkFixHud.Checked);
                 _ini.SetBool("Fix Aspect Ratio", "Enabled", _chkFixAspect.Checked);
+                _ini.SetBool("Fix Nameplates", "Enabled", _chkFixNameplates.Checked);
                 _ini.SetBool("Fix FOV", "Enabled", _chkFixFov.Checked);
 
                 _ini.SetBool("Span HUD", "Enabled", _chkSpanEnabled.Checked);
@@ -1283,7 +1276,6 @@ namespace GBFRUltrawideSetup
                 _ini.SetBool("Span HUD", "SpanAllHUD", _chkSpanAllHud.Checked);
                 _ini.SetBool("Span HUD", "SpanAllBackgrounds", _chkSpanAllBg.Checked);
 
-                // FOV: unsupported on v2.0.2. Still write the value back (harmless; the plugin ignores it and logs a WARN) to keep the key.
                 _ini.SetDouble("Gameplay FOV", "Multiplier", (double)_numFov.Value);
                 _ini.SetDouble("Gameplay Camera Distance", "Multiplier", (double)_numCam.Value);
 
@@ -1319,10 +1311,11 @@ namespace GBFRUltrawideSetup
             SetNum(_numHeight, 0m);
             _chkFixHud.Checked = true;
             _chkFixAspect.Checked = true;
+            _chkFixNameplates.Checked = true;
             _chkFixFov.Checked = true;
             _chkSpanEnabled.Checked = true;
             SelectSpanRatio(0.0);
-            _chkSpanAllHud.Checked = false;
+            _chkSpanAllHud.Checked = true;
             _chkSpanAllBg.Checked = false;
             SetNum(_numFov, 1m);
             SetNum(_numCam, 1m);
