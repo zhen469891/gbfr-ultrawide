@@ -5,6 +5,8 @@ name: Release
 # this workflow then builds the plugin and installer IN PARALLEL, bundles a single
 # ready-to-use zip, and uploads it back onto that same release. The workflow never
 # creates or flips the release itself, so your pre-release choice is preserved.
+# The installer is stamped with the release tag's version (v0.2.0 -> 0.2.0) via
+# build_installer.ps1 -Version; local dev builds fall back to 0.0.0-dev.
 on:
   release:
     types: [published]
@@ -16,13 +18,16 @@ permissions:
 jobs:
   # ---- Line 1: build the ASI plugin (CMake + MSVC) ----
   plugin:
-    runs-on: windows-2022  # ships VS2022, which the "Visual Studio 17 2022" generator needs
+    # Pinned to windows-2022: it ships Visual Studio 2022, which the CMake
+    # "Visual Studio 17 2022" generator needs. windows-latest (windows-2025)
+    # fails to locate a VS instance for that generator.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
       - name: Configure (CMake)
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGBFR_DEV=OFF
       - name: Build plugin (Release)
         run: cmake --build build --config Release
       - name: Upload plugin artifact
@@ -34,33 +39,25 @@ jobs:
 
   # ---- Line 2: build the installer (csc.exe) — independent of the plugin, runs at the same time ----
   installer:
-    runs-on: windows-2022
+    runs-on: windows-2022  # also ships the .NET Framework 4.x csc.exe the script uses
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
-      - name: Build installer (csc.exe)
+      - name: Build installer, stamped with the release tag version
         shell: pwsh
         run: |
-          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          if (-not (Test-Path $csc)) { $csc = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
-          if (-not (Test-Path $csc)) { throw "Could not find .NET Framework csc.exe (v4.0.30319)." }
-          Write-Host "Using compiler: $csc"
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          # Glob every .cs so new source files (e.g. Strings.cs) are picked up automatically
-          $sources = @(Get-ChildItem installer\*.cs | ForEach-Object { $_.FullName })
-          & $csc `
-            /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
-            /win32manifest:installer\app.manifest `
-            /r:System.dll /r:System.Core.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-            /out:out\GBFRUltrawideSetup.exe $sources
-          if ($LASTEXITCODE -ne 0) { throw "csc.exe build failed (exit code $LASTEXITCODE)." }
-          Write-Host "Build complete: out\GBFRUltrawideSetup.exe"
+          $version = "${{ github.event.release.tag_name }}".TrimStart('v')
+          # The script also assembles installer\out\payload from dist\/redist\; the
+          # plugin isn't built in this job, so that part just writes .MISSING.txt
+          # notes. Only the exe is taken from here - the package job assembles the
+          # real payload from the plugin artifact and repo sources.
+          & installer\build_installer.ps1 -Version $version
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
           name: installer
-          path: out/GBFRUltrawideSetup.exe
+          path: installer/out/GBFRUltrawideSetup.exe
           if-no-files-found: error
 
   # ---- Join: combine both build outputs into one ready-to-use zip, attach to the release ----
