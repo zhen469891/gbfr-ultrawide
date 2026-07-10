@@ -162,6 +162,15 @@ std::string sFixName = "GBFRUltrawide";
 #define GBFR_VERSION_STRING "0.0.0-dev"
 #endif
 std::string sFixVer = GBFR_VERSION_STRING;
+// Greppable version marker retained in the .asi so the installer can read the
+// installed plugin version straight from the binary (used as a fallback when the
+// game has never been launched, i.e. no scripts\GBFRUltrawide.log yet). The
+// unique "GBFRUW-VERSION=" prefix makes the version uniquely findable even though
+// a bare "0.2.1" is not. 'volatile' + the dllexport reference below keep the
+// optimizer from discarding the literal. Older .asi files predating this marker
+// simply won't match -> the installer falls through to "unknown".
+extern "C" __declspec(dllexport) volatile const char kGBFRUWVersionTag[] =
+    "GBFRUW-VERSION=" GBFR_VERSION_STRING;
 std::string sLogFile = "GBFRUltrawide.log";
 std::string sConfigFile = "GBFRUltrawide.ini";
 std::string sExeName;

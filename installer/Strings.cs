@@ -145,10 +145,18 @@ namespace GBFRUltrawideSetup
             d["Install.LoaderLabel"] = "ASI Loader (winmm.dll):";
             d["Install.AsiLabel"] = "Ultrawide plugin (scripts\\GBFRUltrawide.asi):";
             d["Install.IniLabel"] = "Config file (scripts\\GBFRUltrawide.ini):";
+            d["Install.VersionLabel"] = "Installed version:";
             d["State.NotChecked"] = "Not checked";
             d["State.Installed"] = "Installed";
             d["State.NotInstalled"] = "Not installed";
             d["State.NA"] = "—";
+
+            // Installed-version detection (the plugin sitting in the game folder)
+            d["Version.Value"] = "v{0}";
+            d["Version.Unknown"] = "installed (version unknown)";
+            d["Version.UpToDate"] = "v{0} (up to date)";
+            d["Version.Outdated"] = "⚠ Installed v{0} is outdated — latest is v{1}. Reinstall to update.";
+            d["Version.UnknownOutdated"] = "⚠ Installed version could not be determined (latest is v{0}). Reinstall to make sure you are up to date.";
 
             // Install tab - action buttons
             d["Install.Install"] = "Install";
@@ -319,10 +327,18 @@ namespace GBFRUltrawideSetup
             d["Install.LoaderLabel"] = "ASI Loader（winmm.dll）：";
             d["Install.AsiLabel"] = "Ultrawide 外掛（scripts\\GBFRUltrawide.asi）：";
             d["Install.IniLabel"] = "設定檔（scripts\\GBFRUltrawide.ini）：";
+            d["Install.VersionLabel"] = "已安裝版本：";
             d["State.NotChecked"] = "未偵測";
             d["State.Installed"] = "已安裝";
             d["State.NotInstalled"] = "未安裝";
             d["State.NA"] = "—";
+
+            // Installed-version detection (the plugin sitting in the game folder)
+            d["Version.Value"] = "v{0}";
+            d["Version.Unknown"] = "已安裝（版本未知）";
+            d["Version.UpToDate"] = "v{0}（已是最新）";
+            d["Version.Outdated"] = "⚠ 已安裝的 v{0} 過舊，最新為 v{1}，請重新安裝以更新。";
+            d["Version.UnknownOutdated"] = "⚠ 無法判斷已安裝的版本（最新為 v{0}），建議重新安裝以確保為最新版。";
 
             // Install tab - action buttons
             d["Install.Install"] = "安裝";

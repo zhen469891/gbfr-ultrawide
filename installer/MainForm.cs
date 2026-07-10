@@ -33,13 +33,13 @@ namespace GBFRUltrawideSetup
         // ---------- Install tab controls ----------
         private TextBox _txtGamePath;
         private Label _lblPathState;
-        private Label _lblLoaderState, _lblAsiState, _lblIniState;
+        private Label _lblLoaderState, _lblAsiState, _lblIniState, _lblVersionState;
         private Button _btnBrowse, _btnDetect;
         private Button _btnInstall, _btnUninstall, _btnOpenDir, _btnOpenLog;
         private TextBox _txtLog;
         // Static install-tab text that must be redrawn when the language changes
         private GroupBox _grpPath, _grpState, _grpMessages;
-        private Label _lblLoaderCaption, _lblAsiCaption, _lblIniCaption;
+        private Label _lblLoaderCaption, _lblAsiCaption, _lblIniCaption, _lblVersionCaption;
 
         // ---------- Settings tab controls ----------
         private Label _lblConfigHint;
@@ -172,10 +172,14 @@ namespace GBFRUltrawideSetup
             _lblLoaderState = MakeStateLabel();
             _lblAsiState = MakeStateLabel();
             _lblIniState = MakeStateLabel();
+            _lblVersionState = MakeStateLabel();
+            // The outdated warning can be long; let it wrap instead of stretching the form.
+            _lblVersionState.MaximumSize = new Size(560, 0);
 
             _lblLoaderCaption = MakeLabel("Install.LoaderLabel");
             _lblAsiCaption = MakeLabel("Install.AsiLabel");
             _lblIniCaption = MakeLabel("Install.IniLabel");
+            _lblVersionCaption = MakeLabel("Install.VersionLabel");
 
             stateGrid.Controls.Add(_lblLoaderCaption, 0, 0);
             stateGrid.Controls.Add(_lblLoaderState, 1, 0);
@@ -183,6 +187,8 @@ namespace GBFRUltrawideSetup
             stateGrid.Controls.Add(_lblAsiState, 1, 1);
             stateGrid.Controls.Add(_lblIniCaption, 0, 2);
             stateGrid.Controls.Add(_lblIniState, 1, 2);
+            stateGrid.Controls.Add(_lblVersionCaption, 0, 3);
+            stateGrid.Controls.Add(_lblVersionState, 1, 3);
 
             _grpState = MakeGroup("Install.StateGroup", stateGrid);
             root.Controls.Add(_grpState, 0, 1);
@@ -467,6 +473,7 @@ namespace GBFRUltrawideSetup
             _lblLoaderCaption.Text = Strings.L("Install.LoaderLabel");
             _lblAsiCaption.Text = Strings.L("Install.AsiLabel");
             _lblIniCaption.Text = Strings.L("Install.IniLabel");
+            _lblVersionCaption.Text = Strings.L("Install.VersionLabel");
             _btnInstall.Text = Strings.L("Install.Install");
             _btnUninstall.Text = Strings.L("Install.Uninstall");
             _btnOpenDir.Text = Strings.L("Install.OpenDir");
@@ -680,6 +687,9 @@ namespace GBFRUltrawideSetup
                         }
                         _updateInfo = result;
                         RefreshUpdateNotice();
+                        // The installed-vs-latest comparison depends on the GitHub result,
+                        // so re-evaluate the install status now that it has arrived.
+                        RefreshStatus();
                     });
                 }
                 catch (ObjectDisposedException) { }
@@ -739,9 +749,11 @@ namespace GBFRUltrawideSetup
                 _lblPathState.ForeColor = Color.Firebrick;
             }
 
+            bool asiInstalled = valid && File.Exists(Path.Combine(game, AsiRelPath));
             SetState(_lblLoaderState, valid && File.Exists(Path.Combine(game, "winmm.dll")), valid);
-            SetState(_lblAsiState, valid && File.Exists(Path.Combine(game, AsiRelPath)), valid);
+            SetState(_lblAsiState, asiInstalled, valid);
             SetState(_lblIniState, valid && File.Exists(Path.Combine(game, IniRelPath)), valid);
+            RefreshInstalledVersion(game, valid, asiInstalled);
 
             _btnInstall.Enabled = valid;
             _btnUninstall.Enabled = valid;
@@ -766,6 +778,70 @@ namespace GBFRUltrawideSetup
                 label.Text = Strings.L("State.NotInstalled");
                 label.ForeColor = Color.Firebrick;
             }
+        }
+
+        /// <summary>
+        /// Detects and displays the plugin version installed in the game folder, and warns
+        /// when it is older than the latest known version. "Latest" is the higher of the
+        /// installer's own shipping version and the newest GitHub release (when the online
+        /// check has already returned). Uses UpdateChecker.CompareVersions throughout.
+        /// </summary>
+        private void RefreshInstalledVersion(string game, bool pathValid, bool asiInstalled)
+        {
+            if (_lblVersionState == null) return;
+
+            // Path not valid, or the plugin isn't installed at all: nothing to report here
+            // (the ASI row already shows "Not installed"), keep the version row neutral.
+            if (!pathValid || !asiInstalled)
+            {
+                _lblVersionState.Text = Strings.L("State.NA");
+                _lblVersionState.ForeColor = SystemColors.GrayText;
+                return;
+            }
+
+            string installed = InstalledVersion.Detect(game);
+            string latest = LatestKnownVersion();
+
+            if (string.IsNullOrEmpty(installed))
+            {
+                // Installed but version undetectable (old .asi with no marker and no log yet).
+                // Soft prompt: possibly outdated, never a hard error.
+                _lblVersionState.Text = Strings.F("Version.UnknownOutdated", latest);
+                _lblVersionState.ForeColor = Color.Firebrick;
+                return;
+            }
+
+            int cmp = UpdateChecker.CompareVersions(installed, latest);
+            if (cmp < 0)
+            {
+                _lblVersionState.Text = Strings.F("Version.Outdated", installed, latest);
+                _lblVersionState.ForeColor = Color.Firebrick;
+            }
+            else if (cmp == 0)
+            {
+                _lblVersionState.Text = Strings.F("Version.UpToDate", installed);
+                _lblVersionState.ForeColor = Color.Green;
+            }
+            else
+            {
+                // Installed is newer than anything we know about (dev/local build) - just
+                // show it, no warning.
+                _lblVersionState.Text = Strings.F("Version.Value", installed);
+                _lblVersionState.ForeColor = SystemColors.ControlText;
+            }
+        }
+
+        /// <summary>
+        /// The newest version to compare an installed plugin against: the higher of this
+        /// installer's shipping version and the latest GitHub release (if the check ran).
+        /// </summary>
+        private string LatestKnownVersion()
+        {
+            string latest = UpdateChecker.CurrentVersion;
+            if (_updateInfo != null && !string.IsNullOrEmpty(_updateInfo.LatestVersion) &&
+                UpdateChecker.CompareVersions(_updateInfo.LatestVersion, latest) > 0)
+                latest = _updateInfo.LatestVersion;
+            return latest;
         }
 
         // ==================================================================
