@@ -1,6 +1,6 @@
 # ADR-0004: Fixing the fill-width zoom/crop on ultrawide
 
-- Status: Accepted
+- Status: Accepted (2026-07-10); the >16:9 crop value choice (1.0) is superseded by [ADR-0012](0012-crop-factor-is-shared-with-combat-vfx.md) — the factor also sizes full-screen combat-VFX quads, and field A/B showed fAspectMultiplier does not zoom the scene
 - Date: 2026-07-09
 
 ## Context

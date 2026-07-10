@@ -139,10 +139,22 @@ Other resolution globals: swapchain size @ 0x07193038 / 0x07193040, UI cached wi
 - **+0x9D0 = aspect**, **+0x9D4 = FOV** (radians), **+0x9DE = projection dirty flag**.
 - Aspect writer verified @ RVA 0x00691D3A (`vdivss w/h` → `vmovss [rdx+0x9D0]`).
 - **True projection-matrix builder @ RVA 0x00750970**: dirty(+0x9DE)-triggered,
-  `xscale = 1/tan(fov/2)/aspect`, writes camera `+0x40` / `+0x100`. This — not the
-  AspectRatio hook — is what actually shapes the 3D frustum, so it gets its own
-  ProjMatrixAspect hook. Data-driven 16:9 writers set the dirty flag themselves, so
-  overriding aspect right at the matrix builder covers every camera and aspect source.
+  `yscale = 1/tan(fov/2)`, `xscale = yscale/aspect`, writes camera `+0x40` / `+0x100`.
+  This — not the AspectRatio hook — is what actually shapes the 3D frustum, so it hosts
+  both the ProjMatrixAspect hook (§3.5) and the ProjMatrixFOV hook (§3.19). Data-driven
+  16:9 writers set the dirty flag themselves, so overriding aspect/FOV right at the
+  matrix builder covers every camera and aspect source.
+- **`+0x9D4` has 14+ rip-visible writers** (RVAs 0x006923A1, 0x00947D98, 0x00947E15,
+  0x00948128, 0x0094AE53, 0x0094D313, 0x0095F6E5, 0x00962E05, 0x009FBA27, 0x00B31BC7,
+  0x013D8415, 0x02DA7BAA, 0x036BF05B, 0x036BF777 — plus register-indirect ones), several
+  per-frame. **Never memory-multiply the FOV field** — the write is either overwritten or
+  compounds every frame; multiply in a register at the final consumer instead (ADR-0011).
+- **Camera preset struct** (source of the gameplay camera params): `+0x14` = distance
+  (meters, default 4.8), `+0x18` = FOV (radians, default **0.8726646 = 50.0°**). Four
+  inlined "apply active preset" sites publish these to the **global camera-params block**
+  — dist → RVA **0x07C25720**, FOV → 0x07C25724 (§3.20). Block defaults initialized at
+  boot from `.rdata 0x054A4B50` = `{4.8, 0.8726646, 0.1, 0}` (writer @ RVA 0x0022D4B6).
+  These data anchors are the place to restart a hunt if the preset-publish patterns die.
 
 ### 2.6 Canvas fill-width mapping @ RVA 0x0015FAB8
 
@@ -158,17 +170,42 @@ scale  = scaleX + (scaleY - scaleX) * t     with t HARDCODED to 0   => always fi
 NOPing the lerp's `vmulss` turns this into `scaleX + (scaleY - scaleX) = scaleY` →
 fit-height (the v1 look). This replaces the v1 "UIAspect" trick (see CanvasFitHeight below).
 
-### 2.7 Scene crop factor = view constant block +0x59C
+### 2.7 View constant block (+0x580 family) — producer @ RVA 0x020D0E20
 
-The store the **ScreenEffects** hook sits on writes the view CB's **+0x59C**, which in
-v2.0.2 is a shader-consumed **scene crop factor**: `1.0` = uncropped (what the game
-computes at 16:9), `(H*16/9)/W` at wider aspects (0.744186 at 21:9 = fill-width crop).
-Writing `1.0` at >16:9 lets the 3D scene span the full window width. `rax = [rcx+0x2A0]`
-is the view CB pointer at the hook site.
+The view CB (`[rcx+0x2A0]` at the producer's store sites) is filled by the producer
+function at RVA **0x020D0E20** (callers @ RVA 0x0019DBAB and 0x001D73FA). Field map,
+disasm-verified 2026-07-10 (all stored as floats):
+
+| CB offset | value | source |
+| --- | --- | --- |
+| +0x580 | FOV (radians) | camera `+0x9D4` (§2.5) |
+| +0x584 | FOV × `.rdata` const | `+0x580` value × `[0x054A6D84]` |
+| +0x58C / +0x590 | render W/H | int globals 0x06B84088/8C (§2.4); conditionally replaced by `[0x054A4630]` when `[0x07032DE0]+0x65 & 1` |
+| +0x594 / +0x598 | windowRef W/H | int globals 0x06B84098/9C (§2.4), **unconditional** `vcvtsi2ss` |
+| +0x59C | scene crop factor | computed `vdivss` (the ScreenEffects hook site, §3.3) |
+
+> **RVA correction (2026-07-10):** earlier notes placed the producer at 0x020D0DF0 —
+> that address is an **unrelated wrapper**; the real producer entry is 0x020D0E20.
+
+> **+0x59C disp32 scan mirage:** scanning `.text` for stores with `disp32 == 0x59C`
+> yields 18 hits, but they belong to a **different struct family** whose +0x59C is the
+> camera **near plane**, copied from the registry `[0x07C54830]` entry `+0xD2C` — not
+> view CBs. Only the §3.3 site (inside the producer above) writes the view CB's +0x59C;
+> don't chase the other 18 when hunting crop-factor consumers/writers.
+
+**Scene crop factor +0x59C:** the store the **ScreenEffects** hook sits on writes the
+view CB's **+0x59C**, which in v2.0.2 is a shader-consumed **scene crop factor**: `1.0`
+= uncropped (what the game computes at 16:9), `(H*16/9)/W` at wider aspects (0.744186
+at 21:9 = fill-width crop). Writing `1.0` at >16:9 lets the 3D scene span the full
+window width. `rax = [rcx+0x2A0]` is the view CB pointer at the hook site.
+
+**windowRef pair +0x594/+0x598:** hosts the dev-only WindowRefOverride experiment
+(§3.23) — theory: a shader sizes full-screen combat-flash quads as
+`renderH * (+0x594 / +0x598)`, which is 16:9 whenever the pair holds 1920/1080.
 
 ---
 
-## 3. Per-pattern reference (15 patterns + v2 additions)
+## 3. Per-pattern reference (v1 lineage + v2 additions)
 
 Confidence legend: **HIGH** = unique hit + verified semantics; **MEDIUM-HIGH** = unique +
 semantic lineage, runtime check recommended; **MEDIUM** = verified boundary but engine may
@@ -215,9 +252,9 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Feature:** scene crop factor (view CB +0x59C, §2.7) — makes the 3D scene span the full window width at ultrawide.
 - **Pattern:** `C5 ?? ?? ?? 48 ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C3`
 - **Hits / RVA:** unique @ RVA 0x020D117B; hook **+0xB** (RVA 0x020D1186 = `vmovss [rax+0x59C], xmm0`, `rax = [rcx+0x2A0]` = view CB).
-- **Hook semantics:** `if aspect > 16:9 → xmm0 = 1.0` (uncropped); `if aspect < 16:9 → xmm0 = 1.0 * fAspectMultiplier`. **v1 wrote `fAspectMultiplier` (1.34375) here, which was itself causing the zoomed/cropped frame** — the correct value at >16:9 is 1.0.
+- **Hook semantics:** `if aspect != 16:9 → xmm0 = fAspectMultiplier` (both directions; = aspect/(16/9)). **Corrected 2026-07-10 (ADR-0012):** the factor is consumed by BOTH the scene pass and full-screen combat-VFX quads (charge flashes / finisher overlays). The original v2 choice of `1.0` at >16:9 left those quads at 16:9 width — vertical bars exactly on the 16:9 boundaries (GitHub issue #1). Field A/B at 3440×1440 with the FOV confound removed showed the scene renders identically under 1.0 and 1.34375, so the earlier "fAspectMultiplier zooms the scene" reading was confounded.
 - **v1→v2:** pattern/hook offset unchanged; the *semantic meaning* of the stored value changed (crop factor, not a scale).
-- **Hunt method:** `disasm` of the store (`vmovss [rax+0x59C]`) plus shader-side reasoning showed +0x59C is consumed as a crop factor; the disassembly is `vdivss` → `vmovss [rax+0x59C]` → `ret`. The 16:9 value the game computes here is `(H*16/9)/W` (0.744186 at 21:9); the producer function is at RVA 0x020D0DF0.
+- **Hunt method:** `disasm` of the store (`vmovss [rax+0x59C]`) plus shader-side reasoning showed +0x59C is consumed as a crop factor; the disassembly is `vdivss` → `vmovss [rax+0x59C]` → `ret`. The 16:9 value the game computes here is `(H*16/9)/W` (0.744186 at 21:9); the producer function is at RVA **0x020D0E20** (corrected 2026-07-10 — the previously recorded 0x020D0DF0 is an unrelated wrapper; full CB field map in §2.7). Beware the +0x59C disp32 scan mirage (§2.7) when re-hunting.
 - **Confidence:** HIGH.
 
 ### 3.4 AspectRatio (`AspectFOVFix`)
@@ -236,20 +273,30 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Pattern:** `C4 41 7A 10 86 D0 09 00 00 C5 FA 10 3D` (`vmovss xmm8,[r14+0x9D0]` then a rip-relative load).
 - **Hits / RVA:** unique; hook **+0x9** (after the 9-byte `vmovss xmm8,[r14+0x9D0]`).
 - **Hook semantics:** `ctx.xmm8.f32[0] = fAspectRatio`. Because data-driven 16:9 writers set the dirty flag (+0x9DE) themselves, overriding here reaches the matrix regardless of aspect source.
+- **ORDERING:** the ProjMatrixFOV pattern (§3.19) is this pattern extended through the `vmulss`/`call` bytes, and this hook's install at +0x9 rewrites bytes +0x9..+0x10 inside it. `AspectFOVFix()` scans all four aspect/FOV patterns (AspectRatio, ViewParamsFOV, ProjMatrixAspect, ProjMatrixFOV) before installing any of the four hooks. The installed hooks coexist — stolen ranges +0x9..+0x10 vs +0x1A..+0x1E don't overlap (the 9-byte `vmulss` between them stays intact).
 - **v1→v2:** new in v2 (v1 had no separate projection hook — the single aspect write sufficed on v1's code).
 - **Hunt method:** traced why AspectRatio alone left the 3D at 16:9 (that hook feeds a consumer *after* the matrix is built); `disasm` of 0x00750970 revealed the dirty-flag-triggered `1/tan(fov/2)/aspect` builder reading `+0x9D0` into xmm8.
 - **Confidence:** HIGH.
 
-### 3.6 GameplayCamera (`AspectFOVFix`, PARTIAL)
+### 3.6 GameplayCamera (`AspectFOVFix`) — REMOVED 2026-07-10
 
-- **Feature:** gameplay camera-distance multiplier. **FOV multiplier is intentionally NOT installed** (see below).
+> **Status: REMOVED (dead site).** The v2-relocated pattern HIT (unique @ RVA 0x009D8C70)
+> but the distance hook **never FIRED in any session** — ours or bug reporters' — because
+> v2.0.2 gameplay no longer drives the camera through this message path. Community
+> ultrawide research for this exact build reached the same conclusion (its equivalent
+> pattern has 0 hits / never installs). The hook was deleted when the
+> CamDistPreset / FollowCamDist / RoamCamDist families (§3.20–3.22) took over the
+> distance multiplier: keeping it would double-multiply the distance if the message path
+> ever revives. Everything below is retained as **historical reference** so the next
+> game-version port doesn't rediscover this site the hard way.
+
+- **Feature (historical):** gameplay camera-distance multiplier at the camera message-block builder.
 - **Pattern:** `C5 7A 10 ?? ?? ?? 00 00 C5 7A 11 ?? ?? C5 FA 10 ?? ?? ?? 00 00 C5 FA 11 ?? ?? C5 7A 10 ?? ?? ?? 00 00 C5 7A 11 ?? ?? 48 85 C0 74` (three load+store pairs + `test/jz`).
-- **Hits / RVA:** unique @ RVA 0x009D8C70; distance hook **+0x8** (before `vmovss [rbp-0x14], xmm9`).
-- **Hook semantics:** `if fCamDistMulti != 1: ctx.xmm9.f32[0] *= fCamDistMulti` — distance is in xmm9, not yet written to the message block, and the game's own per-area clamps (300 cm indoor / 800 cm general) still apply after. (v1 used xmm8.)
-- **FOV — why not hooked here:** v1's camera message was `{id, dist, FOV, yaw}`; v2.0.2 sends `{id, dist, pitch, yaw}`. The old FOV slot (loaded via xmm7 at pattern+0xD, camera field +0x13A0) is now a **pitch angle in radians** — readers multiply by 1/(2π) and wrap to [−π,π). A v1-style FOV hook here would tilt the camera. Since 2026-07-10 the FOV multiplier is delivered by **ViewParamsFOV** (§3.17) at the view-params consumer site instead; only the `<16:9` vert- compensation remains unported.
+- **Hits / RVA:** unique @ RVA 0x009D8C70; the distance hook was at **+0x8** (before `vmovss [rbp-0x14], xmm9`), `ctx.xmm9.f32[0] *= fCamDistMulti`. HIT, never FIRED.
+- **FOV — the still-relevant trap:** v1's camera message was `{id, dist, FOV, yaw}`; v2.0.2 sends `{id, dist, pitch, yaw}`. The old FOV slot (loaded via xmm7 at pattern+0xD, camera field +0x13A0) is now a **pitch angle in radians** — readers multiply by 1/(2π) and wrap to [−π,π). A v1-style FOV hook here **tilts the camera** instead of zooming. The FOV multiplier lives at ProjMatrixFOV (§3.19); the distance multiplier at §3.20–3.22.
 - **v1→v2:** stack frame changed `rsp`→`rbp` (6-byte SIB stores → 5-byte disp8), and `mov rax,[rsi+0x4358]` was hoisted above the float loads — killing the v1 pattern. Struct offsets (`+0x1398` dist, `+0x13A0` pitch, `+0x13A8` yaw) unchanged.
-- **Hunt method:** `scan "C5 7A 10 ?? ?? ?? ?? 00 C5 7A 11"` → 13 hits, narrowed by `disasm` to 0x009D8C70; cross-checked against consumer handler 0x00A840D7, the 300/800 cm clamp compares, and the distance-squared / atan2-yaw / ÷2π writers to prove the field roles (dist +0x1398, pitch +0x13A0, yaw +0x13A8).
-- **Confidence:** distance HIGH; the "v1 FOV slot is now pitch" reconstruction MEDIUM (no v1 exe to diff against). **Fallback:** offset-anchored pattern `C5 7A 10 ?? 98 13 00 00 …`.
+- **Hunt method (historical):** `scan "C5 7A 10 ?? ?? ?? ?? 00 C5 7A 11"` → 13 hits, narrowed by `disasm` to 0x009D8C70; cross-checked against consumer handler 0x00A840D7, the 300/800 cm clamp compares, and the distance-squared / atan2-yaw / ÷2π writers to prove the field roles (dist +0x1398, pitch +0x13A0, yaw +0x13A8).
+- **Lesson:** a `HIT` proves bytes exist; only a `FIRED` proves the path executes — and even a FIRED does not prove visual effect (ADR-0011, §3.17).
 
 ### 3.7 CutsceneFOV (`AspectFOVFix`)
 
@@ -303,6 +350,7 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **v1→v2:** struct shift −0x38; width register xmm0→xmm1; `<16:9` hook +0x28→+0x29 (v1's +0x28 landed on the last byte of the 8-byte `vmovss xmm4,[rax+0x1C0]`).
 - **Hunt method:** `disasm` at base showed the width load into xmm1 and the mid-instruction boundary at +0x28.
 - **Cross-verified 2026-07-10** against community ultrawide research for this exe build (0x6A3E573A): the ID lists (12 width / 11 height = width minus dialogue bg 2454207042), formulas and gating shape match ours exactly. A height hook at pattern+0x57 would land **mid-instruction** in this exe (an off-by-one seen in the wild, never exercised — it only installs at <16:9); the correct boundary is pattern+0x58 = our base+0x29, which we already use.
+- **Probe diagnostic** (`[Debug - Backgrounds] Probe = true` in `GBFRUltrawide.dev.ini`; **dev builds only** — release builds compile the machinery out, per ADR-0010): the >16:9 width hook logs one greppable `PROBE-BG: #N id=… w=… h=… verdict=list-hit|spanall|not-widened` line per unique object id (first 64; **all** ids passing the site, not only w==3840, in case a target quad is authored at a non-3840 width). Costs one bool check when disabled. This is the capture workflow for full-screen overlay quads that still render as a centered 16:9 band because their id is missing from `BackgroundWidthIDs` — e.g. the Io charge-complete flash (GitHub issue #1): ids whose *first sighting* lands at the artifact moment are the candidates; whitelist every candidate with `w=3840`. The permanent fix is always an in-code id addition, never an ini knob.
 - **Confidence:** HIGH.
 
 ### 3.12 HUDConstraints (`HUDFix`) — REWORKED 2026-07-10
@@ -312,11 +360,11 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Hits / RVA:** @ RVA 0x0261C638; hook **+0x1C** (RVA 0x0261C654). Site registers: **rcx = child element, rax = parent canvas** (non-null — the site's `test/jz` at +0x07 jumps past the hook), `xmm2 = parent width [rax+0x1BC]`, `xmm0 = parent height [rax+0x1C0]`.
 - **Hook semantics** (child struct: +0x19C px.x, +0x1A4/+0x1AC anchorA.x/anchorB.x, +0x1BC w, +0x1C0 h, +0x1C4 id):
   1. **Nameplate refresh** (`bFixNameplates`, >16:9): `*g_pNameplateScalar = 1/fAspectRatio` (see §3.18).
-  2. **EdgeSnapIds / MoveIds** (wide only; **dev builds only** — `#ifdef GBFR_DEVBUILD`, set via `build.ps1 -Dev` / CMake `GBFR_DEV=ON`; ini `[Debug - Span HUD] EdgeSnapIds = id,id,…` / `MoveIds = id:deltaX,…`): per-child-id px.x overrides applied **before** any blocklist decision, so even blocklisted menu children can be pushed to the true screen edge. Capture base px.x on first sight (fixed-capacity, 32 ids per list, shared 64-slot base map), then every pass write `[child+0x19C] = base + delta` where delta is explicit (MoveIds, canvas units) or `sign(base) · (2160·fHUDAspectRatio − 3840)/2` (EdgeSnapIds — the canvas half-widening delta). MoveIds overrides EdgeSnapIds for the same id. `|base| < 1` in EdgeSnap mode = side unknown → left unchanged, warned once. **Position only** — the widen registers are never touched here.
+  2. **EdgeSnapIds / MoveIds** (wide only; **dev builds only** — `#ifdef GBFR_DEVBUILD`, set via `build.ps1 -Dev` / CMake `GBFR_DEV=ON`; `GBFRUltrawide.dev.ini` `[Debug - Span HUD] EdgeSnapIds = id,id,…` / `MoveIds = id:deltaX,…`): per-child-id px.x overrides applied **before** any blocklist decision, so even blocklisted menu children can be pushed to the true screen edge. Capture base px.x on first sight (fixed-capacity, 32 ids per list, shared 64-slot base map), then every pass write `[child+0x19C] = base + delta` where delta is explicit (MoveIds, canvas units) or `sign(base) · (2160·fHUDAspectRatio − 3840)/2` (EdgeSnapIds — the canvas half-widening delta). MoveIds overrides EdgeSnapIds for the same id. `|base| < 1` in EdgeSnap mode = side unknown → left unchanged, warned once. **Position only** — the widen registers are never touched here.
   3. **Combat Prompts** (wide only): children of host **2939675107** with anchors 0.5/0.5 and `|px.x| ≥ 1600` → capture base px.x on first sight (fixed-capacity map, 16 slots), then write `[child+0x19C] = base * fAspectMultiplier` every pass.
   4. **Gameplay HUD root 1719602056**: span unconditionally (the one v1 id still carried by community research for this build; possibly dead on v2 — one-shot FIRED log tells).
   5. **SpanAllHUD register mode** (`bSpanAllHUD`): block if (parent id ∈ blocklist{1579537302, 584127281, 141651223, 3723338869, 2229826448, 1465589452, 2464430819, 368881640} OR parent id ∈ menuTree OR child id ∈ {3646400251, 3659745599, 178979338}) AND child anchorA.x == anchorB.x; menuTree = `unordered_set` seeded {1465589452, 141651223, 584127281}, transitively marks children of marked parents, never cleared. Then widen only full-canvas parents (w==3840 && h==2160 exact): wide → `xmm2 = 2160*fHUDAspectRatio`, narrow → `xmm0 = 3840/fHUDAspectRatio`. **Register-only** — no struct writes in the widen paths.
-- **Probe diagnostic** (`[Debug - Span HUD] Probe = true`; **dev builds only** — release builds compile the probe machinery out, `probeLog` becomes a no-op): logs one greppable `PROBE: parent=… child=… wh=…x… anchors=…/… px=… verdict=…` line per unique child id (first 200, including skipped/blocklisted ones); verdicts: `edgesnap|move|prompt-recenter|widen-root|widen|skip-spanallhud-off|skip-menutree|skip-blocklist|skip-childblock|skip-not-fullcanvas`. Costs a single bool check when disabled. This is the discovery workflow for EdgeSnapIds/MoveIds candidates.
+- **Probe diagnostic** (`[Debug - Span HUD] Probe = true` in `GBFRUltrawide.dev.ini`; **dev builds only** — release builds compile the probe machinery out, `probeLog` becomes a no-op): logs one greppable `PROBE: parent=… child=… wh=…x… anchors=…/… px=… verdict=…` line per unique child id (first 200, including skipped/blocklisted ones); verdicts: `edgesnap|move|prompt-recenter|widen-root|widen|skip-spanallhud-off|skip-menutree|skip-blocklist|skip-childblock|skip-not-fullcanvas`. Costs a single bool check when disabled. This is the discovery workflow for EdgeSnapIds/MoveIds candidates.
 - **Interaction with UIMarkersCanvas (§3.10):** the global canvas manager's width is rewritten to 2160·aspect by that hook; if the manager ever appears as "parent" here its w≠3840 so the full-canvas gate skips it — correct either way (root already widened).
 - **Diagnostics:** one-shot `FIRED: HUDConstraints`, per-unique-child `FIRED: HUDConstraints span #N: parent=… child=… …` (first 20) for post-test ID triage.
 - **Hunt method:** `disasm` confirmed the +0x1C boundary; body semantics derived from independent runtime analysis of the v2.0.2 exe, cross-validated against community ultrawide research.
@@ -361,15 +409,24 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Hunt method:** anchored on the 3-entry double frame-time table **@ RVA 0x054D6BF0** = `{1/30, 1/60, 1/120}` (indexed by the fps menu setting; the index comes from `[0x07C26B70]` + `byte[rax+0x3D]`) — the most reliable anchor; `disasm` located the load + the `vucomisd`/`pause` busy-wait spin. A minimal alternative pattern is `C5 7B 10 14 C8` (hook +0x5).
 - **Confidence:** HIGH.
 
-### 3.17 ViewParamsFOV (`AspectFOVFix`, NEW 2026-07-10)
+### 3.17 ViewParamsFOV (`AspectFOVFix`, NEW 2026-07-10; ROLE CHANGE 2026-07-10)
 
-- **Feature:** gameplay FOV multiplier (`[Gameplay FOV] Multiplier`) at the view-params consumer site. Replaces the dead v1-style GameplayCamera FOV path (§3.6). Derived from independent analysis of the v2.0.2 exe, cross-validated against community ultrawide research.
+> **Role change (ADR-0011):** this hook was shipped as "the gameplay FOV multiplier" and
+> logged a genuine FIRED — but it **does not affect the rendered projection**. Its xmm3 is
+> stored only to `[rsp+0x20]` and passed as the 5th argument to `0x0216ABE0`, the
+> culling / shared-view-constants builder; the projection matrix (§2.5, RVA 0x00750970)
+> re-reads the FOV **from memory** `[r14+0x9D4]`, out of this register's reach. The
+> rendered FOV is served by **ProjMatrixFOV** (§3.19). This hook is **kept** as the
+> culling-consistency companion: without it, `fFOVMulti > 1` culls objects against the
+> narrower unmultiplied frustum and pops them at the screen edges.
+
+- **Feature:** culling/shared-view-constants FOV consistency for `[Gameplay FOV] Multiplier` (companion of §3.19).
 - **Pattern:** `C5 ?? ?? ?? A0 09 00 00 C5 ?? ?? ?? A4 09 00 00 C5 ?? ?? ?? D0 09 00 00 C5 ?? ?? ?? D4 09 00 00` — the four adjacent view-params loads (viewport W `+0x9A0`, viewport H `+0x9A4`, aspect `+0x9D0`, FOV `+0x9D4`; rax = view-params object from the preceding `mov rax,[rbx]`).
-- **Hits / RVA:** expected unique @ RVA **0x0075109A**; hook **+0x20**, immediately after `vmovss xmm3,[rax+0x9D4]` loads the FOV.
-- **Hook semantics:** `ctx.xmm3.f32[0] *= fFOVMulti` — pure linear multiply, register only; no tan(), no memory write, no cutscene exclusion, no aspect gate. Installed only when `fFOVMulti != 1.0`.
+- **Hits / RVA:** expected unique @ RVA **0x0075109A**; hook **+0x20**, immediately after `vmovss xmm3,[rax+0x9D4]` loads the FOV. xmm3's only consumer is the `[rsp+0x20]` store feeding `call 0x0216ABE0`.
+- **Hook semantics:** `ctx.xmm3.f32[0] *= fFOVMulti` — register only, no memory write. Installed only when `fFOVMulti != 1.0` (same gate as ProjMatrixFOV, so the two stay in lockstep).
 - **No aspect hook at +0x10:** pattern+0x10 is a viable spot to force `[obj+0x9D0]`; we don't hook it — our AspectRatio hook (§3.4) is installed at this very RVA and already force-writes `+0x9D0` before the +0x10 load.
-- **ORDERING IS LOAD-BEARING:** this pattern starts at the exact address the AspectRatio mid-hook patches, and the AspectRatio pattern (RVA 0x00751089, 0x37 bytes) spans the +0x20 hook site. `AspectFOVFix()` therefore scans **both** patterns before installing **either** hook — a scan after install MISSes on the trampoline `jmp` bytes.
-- **Confidence:** HIGH (site disasm verified against this exe; runtime-tested on this build).
+- **ORDERING IS LOAD-BEARING:** this pattern starts at the exact address the AspectRatio mid-hook patches, and the AspectRatio pattern (RVA 0x00751089, 0x37 bytes) spans the +0x20 hook site. Together with the §3.5/§3.19 overlap this is why `AspectFOVFix()` scans **all four** aspect/FOV patterns before installing **any** hook — a scan after install MISSes on the trampoline `jmp` bytes.
+- **Confidence:** site/boundary HIGH (disasm- and runtime-verified); the culling-consistency benefit is MEDIUM-HIGH (0x0216ABE0's downstream not fully traced; harmless either way).
 
 ### 3.18 Nameplate (`NameplateFix`, NEW 2026-07-10)
 
@@ -380,6 +437,60 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **g_pNameplateScalar:** the store at +0x3C is `C5 FA 11 0D disp32` (8 bytes); the game global (≈RVA 0x07194FCC) is resolved at scan time as `site + 0x3C + 8 + disp32` (byte-checked first, **before** the mid-hook rewrites the site). The HUDConstraints hook (§3.12 step 1) refreshes it to `1/fAspectRatio` every pass, covering frames where this site doesn't run.
 - **Install gates:** `bFixNameplates` (`[Fix Nameplates] Enabled`, default true) AND `fAspectRatio > 16:9`.
 - **Confidence:** HIGH (0x3C bytes of concrete pattern; runtime-tested on this build).
+
+### 3.19 ProjMatrixFOV (`AspectFOVFix`, NEW 2026-07-10)
+
+- **Feature:** the **rendered** gameplay-FOV multiplier (`[Gameplay FOV] Multiplier`) — the visual half of the FOV feature (ADR-0011; §3.17 is the culling half). Applied inside the projection-matrix builder (§2.5, RVA 0x00750970), so it reaches the actual frustum. Design cross-derived from community ultrawide research for this exact build and re-verified instruction-by-instruction offline.
+- **Pattern:** `C4 41 7A 10 86 D0 09 00 00 C5 FA 10 3D ?? ?? ?? ?? C4 C1 42 59 86 D4 09 00 00 E8` — the ProjMatrixAspect pattern (§3.5) extended through `vmovss xmm7,[rip→0.5]`, `vmulss xmm0,xmm7,[r14+0x9D4]` (xmm0 = FOV/2, read **from memory**) and the `call` opcode.
+- **Hits / RVA:** expected unique @ RVA **0x00750970** (fileOffset 0x0074FD70); hook **+0x1A** = RVA 0x0075098A, the 5-byte `E8` call to tanf. safetyhook steals exactly the call and relocates its rel32; the hook body runs *before* the relocated call.
+- **Hook semantics:** `ctx.xmm0.f32[0] *= fFOVMulti` ⇒ `tan((m·FOV)/2)` — exact angular multiply; `yscale = 1/tan(FOV/2)` and `xscale = yscale/aspect` both follow. Installed only when `fFOVMulti != 1.0`. **Register-only — never write `[obj+0x9D4]`** (14+ writers, §2.5: overwritten or compounding).
+- **Scope:** the builder serves **every** camera whose dirty flag (+0x9DE) is set — gameplay, cutscenes, menu 3D scenes. No "is gameplay" discriminator exists at this site; the multiplier is **global by design**. A gameplay-only fallback (scale the preset-FOV publish at the §3.20 sites, preset field `+0x18` → global 0x07C25724) exists but is indirect and unverified — MEDIUM confidence only, use only if cutscene exclusion is ever demanded.
+- **ORDERING IS LOAD-BEARING:** first 13 bytes of this pattern ARE the ProjMatrixAspect pattern, whose mid-hook at +0x9 rewrites bytes +0x9..+0x10. Scan all four aspect/FOV patterns before installing any hook (§3.5, §3.17). The two builder hooks coexist once installed (+0x9..+0x10 vs +0x1A..+0x1E; the 9-byte `vmulss` between them stays intact).
+- **Hunt method:** root cause of the "FOV does nothing" report (issue #2) — `disasm` of the ViewParamsFOV site proved xmm3 feeds only `0x0216ABE0`; `disasm` of 0x00750970 showed the builder re-reads `[r14+0x9D4]` and the `E8` boundary at +0x1A. If this pattern dies in a future build, re-find the builder from the §2.5 anchors: `xref` a writer of `+0x9D4` or scan for the `0x9D0/0x9D4` load pair near a tanf call.
+- **Confidence:** root cause HIGH (disasm-verified); site/pattern/boundary HIGH (offline-verified 1 hit); visual effect needs one eyes-on confirmation per the ADR-0011 lesson.
+
+### 3.20 CamDistPreset (`AspectFOVFix`, NEW 2026-07-10)
+
+- **Feature:** camera distance multiplier (`[Gameplay Camera Distance] Multiplier`) — primary family, replacing the dead GameplayCamera site (§3.6). Scales the preset distance at the moment it is published to the global camera-params block. Design cross-derived from community ultrawide research for this build, re-verified offline.
+- **Pattern:** `C5 FA 10 41 14 C5 FA 11 05 ?? ?? ?? ?? C5 F8 28 41 30 C5 F8` — `vmovss xmm0,[rcx+0x14]` (rcx = active preset, +0x14 = distance in meters, default 4.8) + `vmovss [rip→0x07C25720],xmm0` (publish) + the start of the rest of the block copy.
+- **Hits / RVA:** **4 hits** (verified offline) @ RVA **0x0095A91F / 0x01F9245F / 0x0268DA8F / 0x02DB617F** — four inlined copies of "apply active camera preset" (each iterates a preset list, picks the active entry via flag bytes +0x74/+0x69, then publishes). All four store to the **same** global 0x07C25720 (§2.5). **Hook ALL FOUR** (like GfxCorruption): which copy runs depends on game mode; over-hooking is harmless since each publish is scaled exactly once.
+- **Hook offset / semantics:** **+0x5** (after the 5-byte load, before the 8-byte rip-relative publish store; safetyhook relocates the rip operand — same class as FPSCap/Nameplate). `ctx.xmm0.f32[0] *= fCamDistMulti`. The preset *source* field is never written, so re-publishing never compounds. Installed only when `fCamDistMulti != 1.0`.
+- **Expected runtime behavior:** FIRED on area load / camera-mode change (base 4.8 → e.g. 5.76 at 1.2×); the log warns if the hit count differs from 4.
+- **Hunt method / re-hunt:** anchor on the global 0x07C25720 (`xref` it) or the `.rdata` defaults block 0x054A4B50 (§2.5); the publish sites are the writers of the global.
+- **Confidence:** HIGH (all four sites disasm-verified; defaults read from `.rdata`).
+
+### 3.21 FollowCamDist (`AspectFOVFix`, NEW 2026-07-10)
+
+- **Feature:** camera distance multiplier — follow-camera (combat/lock-on) zoom track. Companion family of §3.20.
+- **Pattern:** `C5 7A 10 ?? 7C 01 00 00 EB ?? C4 41 38 57 C0 EB ?? C5 7A 10 ?? 80 01 00 00 EB ?? C5 7A 10 ?? 84 01 00 00 C4 41 30 57 C9` — a 1/2/3-channel track-evaluation selector (`popcnt` on a channel mask) loading the follow-cam zoom into **xmm8** from `[rdi+0x17C/+0x180/+0x184]`, or `vxorps xmm8` when no channel; all arms converge on `vxorps xmm9,xmm9,xmm9`.
+- **Hits / RVA:** unique (verified offline) @ RVA **0x022897CF**; hook **+0x23** = RVA 0x022897F2, the 5-byte `vxorps xmm9` where all arms converge (boundary verified; next insn `mov rax,[rsi]` @ 0x022897F7 confirms a clean split).
+- **Hook semantics:** `ctx.xmm8.f32[0] *= fCamDistMulti` (xmm8 may be 0 on the vxorps arm — harmless). Installed only when `fCamDistMulti != 1.0`.
+- **Units/semantics:** this value is a **normalized [0..1] zoom/pull-back fraction**, not meters — downstream (verified) the game computes `dist = min(1.0, max(0, xmm8 + xmm7))` when flag `[obj+0x5B5C]&0x80` is set. A multiplier > 1 pulls back and **saturates at the far end of the zoom range** via that clamp; expected behavior, not a bug.
+- **Expected runtime behavior:** FIRED continuously in combat / lock-on.
+- **Re-hunt:** anchor on the `+0x17C/+0x180/+0x184` offset triple and the popcnt-selector shape.
+- **Confidence:** MEDIUM-HIGH (boundary/semantics verified offline; exact gameplay coverage pending runtime confirmation).
+
+### 3.22 RoamCamDist (`AspectFOVFix`, NEW 2026-07-10)
+
+- **Feature:** camera distance multiplier — free-roam camera config copy. Companion family of §3.20.
+- **Pattern:** `C5 FA 10 ?? 38 C5 FA 11 ?? 54 C5 FA 10 ?? 3C C5 FA 11 ?? 58` — copies free-roam camera config → camera object: `[rsi+0x38]` (distance) → `[rcx+0x54]`, then `[rsi+0x3C]` → `[rcx+0x58]` (second field, intentionally NOT scaled).
+- **Hits / RVA:** unique (verified offline) @ RVA **0x0095A625** (same camera-apply function family as §3.20 hit #1); hook **+0x5** = RVA 0x0095A62A (the 5-byte store; boundary verified).
+- **Hook semantics:** `ctx.xmm0.f32[0] *= fCamDistMulti` — scales only the copied value; the source `[rsi+0x38]` is untouched ⇒ no compounding. Installed only when `fCamDistMulti != 1.0`.
+- **Expected runtime behavior:** FIRED when the free-roam camera (re)initializes.
+- **Re-hunt:** anchor on the `+0x38/+0x54/+0x3C/+0x58` offset quad near the §3.20 hit #1 function.
+- **Confidence:** MEDIUM-HIGH (boundary verified offline; gameplay coverage pending runtime confirmation).
+
+### 3.23 WindowRefOverride (`[Debug - Scene]` in `GBFRUltrawide.dev.ini`, DEV-ONLY EXPERIMENT, NEW 2026-07-10)
+
+- **Purpose:** experiment instrument #2 for the combat skill-flash 16:9 vertical-bars bug (GitHub issue #1; instrument #1 is `CropFactorOverride`, §3.3/ADR-0004 notes). **Not a shipping feature** — compiled only into dev builds (`build.ps1 -Dev`), ignored by release builds.
+- **Theory under test (MEDIUM):** a shader sizes the full-screen combat-flash quad as `renderH * (CB+0x594 / CB+0x598)` (the §2.7 windowRef pair); if the pair holds 1920/1080 the quad is exactly 16:9 wide → vertical bars at the 16:9 boundaries at 3440×1440.
+- **Open contradiction the FIRED log settles:** the runtime DIAG dump shows the int globals 0x06B84098/9C already patched to **3440/1440** (ResPublish, §3.1 F3) — the ratio would already be 2.389, killing the theory, **unless** the producer runs before the patch or reads another source. The one-shot FIRED line prints the INCOMING width the producer actually converted, so one launch decides.
+- **Pattern (46 bytes, both rip disp32s wildcarded):** `C5 CA 2A 0D ?? ?? ?? ?? 48 8B 91 A0 02 00 00 C5 FA 11 8A 94 05 00 00 C5 CA 2A 0D ?? ?? ?? ?? 48 8B 91 A0 02 00 00 C5 FA 11 8A 98 05 00 00` — `vcvtsi2ss xmm1,xmm6,[rip→windowRefW]` + `mov rdx,[rcx+0x2A0]` + `vmovss [rdx+0x594],xmm1`, then the same triple for windowRefH → +0x598. The `+0x594`/`+0x598` disp32 bytes carry the semantics; the volatile rip disp32s are wildcarded.
+- **Hits / RVA:** unique (verified offline with `gbfr_analyze scan`, 2026-07-10) @ RVA **0x020D10C5**, inside the §2.7 producer. Hook **+0x8** = RVA 0x020D10CD, immediately after the width `vcvtsi2ss` (xmm1 = incoming width float), landing on the 7-byte `mov` (no rip-relative operand → safe relocation).
+- **Hook semantics (register-only):** `xmm1 = (float)windowRefH * fAspectRatio`, where windowRefH is re-read from the **same int global the +0x598 store consumes a few instructions later**, resolved at install time from the second `vcvtsi2ss`'s disp32 (pattern+0x1B, `GetAbsolute64`). Chosen over a hardcoded `1080 * aspect` because the disasm shows the +0x598 store is **unconditional** from that global (no `[0x07032DE0]+0x65` branch, unlike the render pair at +0x58C/+0x590): if the global holds 1440 at runtime, `1080·aspect` would make the pair's ratio 1.79 instead of the screen aspect and corrupt the experiment. This way `+0x594/+0x598 == fAspectRatio` regardless of whether the producer sees pre-patch (1080) or post-patch (1440) values.
+- **Gating / diagnostics:** the pattern is scanned in **every dev build** regardless of the ini key — the `HIT: WindowRefOverride site` line is a pattern-survival canary. The install log also dumps both resolved globals **and their current int values** (post-injection-delay evidence of ResPublish state). The hook installs only when `[Debug - Scene] WindowRefOverride = true` (in `GBFRUltrawide.dev.ini`) AND aspect > 16:9. One-shot `FIRED: WindowRefOverride (CB windowRef W in: <incoming> -> <new>; windowRefH global: <H>)`.
+- **How to read the result:** incoming **1920** → producer sees pre-patch values, theory alive (and if the bars vanish with the override on, the consumer is found); incoming **3440** → the pair was already screen-sized, this theory is dead regardless of visuals. Run with `CropFactorOverride = -1` so the two instruments don't confound.
+- **Confidence:** site/boundary HIGH (offline-verified unique hit + instruction lengths); theory MEDIUM (that is what the experiment is for).
 
 ---
 
@@ -417,3 +528,9 @@ pattern like this:
    patterns (LODDistance), confirm the visible effect in-game. The v1 "UIMarkers" port is the
    cautionary tale: unique hit, plausible semantics, but a mode-gated path that never ran —
    only the missing `FIRED` line exposed it (see ADR-0006).
+9. **A `FIRED` proves execution, not visual effect.** The original ViewParamsFOV hook (§3.17)
+   fired on exactly the right value at a site whose output nothing visual consumes — the
+   feature was "field-verified" by log for a while, yet changed nothing on screen (ADR-0011).
+   Any hook whose purpose is visual must be verified **eyes-on** before its confidence is
+   marked HIGH; log-only verification is valid only when the effect is itself observable in
+   the log (e.g. resolution values, table patches).

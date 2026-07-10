@@ -1,6 +1,6 @@
 # ADR-0008: Gameplay FOV multiplier at the view-params consumer, not the camera message
 
-- Status: Accepted
+- Status: Accepted (2026-07-10); superseded by [ADR-0011](0011-fov-multiplier-inside-projection-builder.md) — the view-params multiply never affected the rendered projection (it feeds culling only); the hook is retained as the culling-consistency companion of ProjMatrixFOV
 - Date: 2026-07-10
 
 ## Context

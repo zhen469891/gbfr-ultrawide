@@ -13,7 +13,7 @@
 //   width 0x1F4 -> 0x1BC | height 0x1F8 -> 0x1C0 | object ID 0x1FC -> 0x1C4
 //   offsX 0x1CC -> 0x194 | offsY  0x1D0 -> 0x198 | our marker 0x200 -> 0x1C8
 //
-// Alive on v2.0.2 (15):
+// Alive on v2.0.2:
 //   [OK]    Resolution      (ApplyResolution)  - verified; 2 hits (two inlined copies), BOTH hooked at +0x25
 //                                                (diagnostic: runtime showed hooks install but 21:9 not applied,
 //                                                so we no longer assume the first copy is the live path)
@@ -61,18 +61,33 @@
 //                                                only lane0 (w/64) is still stored raw - our hook fixes it
 //   [REFOUND v2.0.2] GfxCorruption2 (GraphicalFixes) - new pattern, 2 hits (alloc success/fallback arms), both
 //                                                hooked at +0x8; same lane0 = width/64 fix as GfxCorruption1
-//   [REFOUND v2.0.2 - PARTIAL] GameplayCamera (AspectFOVFix) - new pattern (unique hit RVA 0x009D8C70). CamDist OK:
-//                                                hook at +0x8, xmm9 (was -0xE, xmm8). The v1-style FOV hook stays
-//                                                uninstalled here (v2's camera message is {id, dist, pitch, yaw} -
-//                                                the v1 FOV slot is now a pitch angle, hooking it would tilt the
-//                                                camera); the FOV multiplier is instead delivered by the NEW
-//                                                ViewParamsFOV hook below
-//   [NEW 2026-07-10] ViewParamsFOV (AspectFOVFix) - gameplay FOV multiplier at the view-params consumer site
-//                                                (expected RVA 0x0075109A, hook at pattern+0x20 right after
-//                                                "vmovss xmm3,[rax+0x9D4]" loads the FOV): xmm3 *= fFOVMulti.
-//                                                Derived from independent analysis of the v2.0.2 exe (build
-//                                                0x6A3E573A), cross-validated against community ultrawide
-//                                                research. Replaces the dead v1-style GameplayCamera FOV path.
+//   [REMOVED 2026-07-10] GameplayCamera (AspectFOVFix) - the v2-relocated message-block site (unique hit RVA
+//                                                0x009D8C70) HIT but its distance hook never FIRED in any
+//                                                session: v2.0.2 gameplay no longer drives the camera through
+//                                                that message path. Hook deleted (it would double-multiply the
+//                                                distance vs the CamDist* families below if the path ever
+//                                                revives). Historical notes - incl. the "v1 FOV slot is now
+//                                                pitch, hooking it tilts the camera" trap - kept in
+//                                                docs/PATTERNS.md 3.6.
+//   [NEW 2026-07-10] ProjMatrixFOV (AspectFOVFix) - THE rendered gameplay-FOV multiplier (ADR-0011): mid-hook
+//                                                inside the projection-matrix builder (expected RVA 0x00750970,
+//                                                hook at pattern+0x1A = the tanf call; xmm0 = FOV/2 at entry):
+//                                                xmm0 *= fFOVMulti before tan(). Serves EVERY camera incl.
+//                                                cutscenes - the multiplier is global by design. Register-only;
+//                                                [obj+0x9D4] is never written (14+ writers, compounding hazard).
+//   [ROLE CHANGE 2026-07-10] ViewParamsFOV (AspectFOVFix) - does NOT affect the rendered projection: its xmm3
+//                                                only feeds the culling/shared-view-constants call (0x0216ABE0);
+//                                                the builder above re-reads FOV from memory. KEPT (same site,
+//                                                RVA 0x0075109A, hook +0x20, xmm3 *= fFOVMulti) so the culling
+//                                                path sees the same multiplied FOV as ProjMatrixFOV - without
+//                                                it, multipliers > 1 pop objects at the screen edges. ADR-0011.
+//   [NEW 2026-07-10] CamDistPreset / FollowCamDist / RoamCamDist (AspectFOVFix) - camera distance multiplier,
+//                                                three live hook families replacing the dead GameplayCamera
+//                                                site: preset publish to the global camera-params block
+//                                                (4 hits, ALL hooked at +0x5, xmm0, meters), follow-cam zoom
+//                                                track (unique hit, +0x23, xmm8, normalized 0..1), free-roam
+//                                                config copy (unique hit, +0x5, xmm0). Derived from community
+//                                                ultrawide research for this exe build, re-verified offline.
 //   [NEW 2026-07-10] Nameplate    (NameplateFix) - world-anchored nameplate horizontal scale (expected RVA
 //                                                0x00847F6B, hook at pattern+0x3C right after "vdivss
 //                                                xmm1,xmm7,[rax+0x9D0]"): xmm1 = xmm7 / live fAspectRatio.
@@ -87,9 +102,11 @@
 //                                                vucomisd+pause. New pattern @ RVA 0x001B6E63; hook +0x5 -> +0xC
 //                                                (must be after the vmovsd), xmm6 -> xmm10
 //
-// MISS on v2.0.2: none - all 15 v1 patterns relocated, plus 2 new v2-native patterns
-// (ViewParamsFOV, Nameplate). The gameplay FOV multiplier, previously unsupported, is now served
-// by ViewParamsFOV; only the <16:9 vert- FOV compensation remains unported.
+// MISS on v2.0.2: none - all v1 patterns relocated or replaced (GameplayCamera deleted as a dead
+// site), plus the v2-native patterns ViewParamsFOV, ProjMatrixFOV, Nameplate, CamDistPreset,
+// FollowCamDist and RoamCamDist. The gameplay FOV multiplier is served by ProjMatrixFOV (with
+// ViewParamsFOV keeping culling consistent); the camera distance multiplier by the three CamDist*
+// families; only the <16:9 vert- FOV compensation remains unported.
 // =====================================
 
 #include "stdafx.h"
@@ -102,7 +119,12 @@ HMODULE baseModule = GetModuleHandle(NULL);
 // Logger and config setup
 inipp::Ini<char> ini;
 std::string sFixName = "GBFRUltrawide";
-std::string sFixVer = "0.2.0";
+// Stamped at build time: CI passes the release tag via CMake (GBFR_VERSION);
+// local builds fall back to 0.0.0-dev, marking unofficial binaries in user logs.
+#ifndef GBFR_VERSION_STRING
+#define GBFR_VERSION_STRING "0.0.0-dev"
+#endif
+std::string sFixVer = GBFR_VERSION_STRING;
 std::string sLogFile = "GBFRUltrawide.log";
 std::string sConfigFile = "GBFRUltrawide.ini";
 std::string sExeName;
@@ -122,17 +144,55 @@ float fHUDAspectRatio;
 bool bSpanAllHUD;
 bool bSpanAllBackgrounds;
 #ifdef GBFR_DEVBUILD
-// [Debug - Span HUD] per-element position overrides + probe diagnostic (dev builds
-// only - release builds compile all of this out and ignore the ini section).
+// [Debug - Span HUD] per-element position overrides + probe diagnostic, and the
+// [Debug - Backgrounds] probe (dev builds only - release builds compile all of this
+// out and ignore both ini sections).
 // Fixed-capacity storage, filled once in ReadConfig before any hook is installed -
-// the hook reads them lock-free.
+// the hooks read them lock-free.
 bool bHUDProbe;
+bool bBackgroundProbe;
+// [Debug - Scene] CropFactorOverride (dev builds only): diagnostic lever left over
+// from the flash-bars hunt (ADR-0012). The experiment it was built for is CONCLUDED:
+// the view CB's +0x59C factor is consumed by both the scene pass and full-screen
+// combat-VFX quads, and the shipping value at any non-16:9 aspect is now
+// fAspectMultiplier (the scene renders identically under 1.0 and 1.34375 - the old
+// "it zooms the scene" reading was confounded). When >= 0 and the screen is wider
+// than 16:9, the ScreenEffects hook writes THIS value instead of the shipping
+// fAspectMultiplier. Negative = disabled.
+float fCropFactorOverride = -1.0f;
+// [Debug - Scene] WindowRefOverride (dev builds only): second experiment instrument
+// built for the flash-bars hunt. The hunt CONCLUDED via the crop factor (ADR-0012)
+// before this lever was ever needed in-game; kept as a diagnostic. Target: the view CB
+// PRODUCER (RVA 0x020D0E20; docs/PATTERNS.md 2.7/3.23) fills the window-reference pair
+//   CB +0x594 = (float)windowRefW   (int global 0x06B84098)
+//   CB +0x598 = (float)windowRefH   (int global 0x06B8409C)
+// Theory (MEDIUM): a shader sizes the full-screen combat-flash quad as
+// renderH * (CB+0x594 / CB+0x598); if the pair holds 1920/1080 the quad is 16:9 ->
+// vertical bars exactly at the 16:9 boundaries at 3440x1440.
+// OPEN CONTRADICTION the instrument settles: the runtime DIAG dump shows the globals
+// already patched to 3440/1440 (ResPublish) - the ratio would already be 2.389, killing
+// the theory, UNLESS the producer runs before the patch or reads another source. The
+// hook's one-shot FIRED line therefore prints the INCOMING width before overriding.
+// When true and aspect > 16:9, a mid-hook forces CB +0x594 = windowRefH * fAspectRatio
+// (register-only). Diagnostic, NOT a shipping fix.
+bool bWindowRefOverride = false;
+// Resolved at install time from the WindowRefOverride site's second vcvtsi2ss disp32:
+// the int global the game stores to CB +0x598 right after our hooked width store. The
+// hook re-reads it every fire so the override stays consistent with whatever +0x598
+// actually receives that frame (1080 pre-ResPublish vs 1440 after).
+volatile int* g_pWindowRefHGlobal = nullptr;
 constexpr int kMaxMoveEntries = 32;
 uint32_t uEdgeSnapIds[kMaxMoveEntries];
 int iEdgeSnapCount = 0;
 uint32_t uMoveIds[kMaxMoveEntries];
 float fMoveDeltas[kMaxMoveEntries];
 int iMoveIdCount = 0;
+// DIAG-CAMDIST instrumentation (dev builds only): most recent camera/view-params
+// object pointer seen by the AspectRatio / ProjMatrixAspect hooks (the struct with
+// +0x9D0 aspect / +0x9D4 FOV). Sampled every ~2s by DiagCamDistWatchdog (bottom of
+// this file); relaxed atomic - the watchdog only wants "a recent camera", not a
+// synchronized snapshot.
+std::atomic<uintptr_t> g_DiagCamObj{ 0 };
 #endif // GBFR_DEVBUILD
 bool bAspectFix;
 bool bFOVFix;
@@ -256,7 +316,7 @@ void Logging()
         LogInfo("----------");
 #ifdef GBFR_DEVBUILD
         LogInfo("%s v%s loaded. (dev)", sFixName.c_str(), sFixVer.c_str());
-        LogInfo("Development build: [Debug - Span HUD] ini section is active (Probe / EdgeSnapIds / MoveIds).");
+        LogInfo("Development build: [Debug - Span HUD] (Probe / EdgeSnapIds / MoveIds), [Debug - Backgrounds] (Probe) and [Debug - Scene] (CropFactorOverride / WindowRefOverride) sections are active, read from scripts\\GBFRUltrawide.dev.ini.");
 #else
         LogInfo("%s v%s loaded.", sFixName.c_str(), sFixVer.c_str());
 #endif
@@ -312,11 +372,42 @@ void ReadConfig()
     inipp::get_value(ini.sections["Span HUD"], "SpanAllHUD", bSpanAllHUD);
     inipp::get_value(ini.sections["Span HUD"], "SpanAllBackgrounds", bSpanAllBackgrounds);
 #ifdef GBFR_DEVBUILD
-    inipp::get_value(ini.sections["Debug - Span HUD"], "Probe", bHUDProbe);
+    // Dev-only configuration lives in a separate file so the shipped GBFRUltrawide.ini
+    // stays clean: the [Debug - *] sections are read from GBFRUltrawide.dev.ini next to
+    // the main ini (release builds compile this out and never reference the file).
+    // Missing/unreadable file = all debug keys keep their off/empty defaults.
+    inipp::Ini<char> devIni;
+    std::string sDevConfigFile = "GBFRUltrawide.dev.ini";
+    {
+        std::ifstream devIniFile("scripts\\" + sDevConfigFile);
+        if (devIniFile)
+        {
+            LogInfo("Path to dev config file: %s", (sExePath.string() + "scripts\\" + sDevConfigFile).c_str());
+            devIni.parse(devIniFile);
+        }
+        else
+        {
+            // Same alternate-path fallback as the main ini (game root).
+            std::ifstream devIniFileAlt(sDevConfigFile);
+            if (devIniFileAlt)
+            {
+                LogInfo("Path to dev config file: %s", (sExePath.string() + sDevConfigFile).c_str());
+                devIni.parse(devIniFileAlt);
+            }
+            else
+            {
+                LogInfo("Dev config: GBFRUltrawide.dev.ini not found - debug features off");
+            }
+        }
+    }
+    inipp::get_value(devIni.sections["Debug - Span HUD"], "Probe", bHUDProbe);
+    inipp::get_value(devIni.sections["Debug - Backgrounds"], "Probe", bBackgroundProbe);
+    inipp::get_value(devIni.sections["Debug - Scene"], "CropFactorOverride", fCropFactorOverride);
+    inipp::get_value(devIni.sections["Debug - Scene"], "WindowRefOverride", bWindowRefOverride);
     std::string sEdgeSnapIds;
     std::string sMoveIds;
-    inipp::get_value(ini.sections["Debug - Span HUD"], "EdgeSnapIds", sEdgeSnapIds);
-    inipp::get_value(ini.sections["Debug - Span HUD"], "MoveIds", sMoveIds);
+    inipp::get_value(devIni.sections["Debug - Span HUD"], "EdgeSnapIds", sEdgeSnapIds);
+    inipp::get_value(devIni.sections["Debug - Span HUD"], "MoveIds", sMoveIds);
 #endif // GBFR_DEVBUILD
     inipp::get_value(ini.sections["Fix Aspect Ratio"], "Enabled", bAspectFix);
     inipp::get_value(ini.sections["Fix FOV"], "Enabled", bFOVFix);
@@ -351,6 +442,13 @@ void ReadConfig()
     LogInfo("Config Parse: bSpanAllBackgrounds: %s", bSpanAllBackgrounds ? "true" : "false");
 #ifdef GBFR_DEVBUILD
     LogInfo("Config Parse: bHUDProbe: %s", bHUDProbe ? "true" : "false");
+    LogInfo("Config Parse: bBackgroundProbe: %s", bBackgroundProbe ? "true" : "false");
+    LogInfo("Config Parse: fCropFactorOverride: %g", fCropFactorOverride);
+    if (fCropFactorOverride >= 0.0f)
+        LogInfo("Config Parse: [Debug - Scene] CropFactorOverride ACTIVE: ScreenEffects will write %g to the view CB +0x59C factor at >16:9 instead of the shipping fAspectMultiplier - diagnostic only (ADR-0012)", fCropFactorOverride);
+    LogInfo("Config Parse: bWindowRefOverride: %s", bWindowRefOverride ? "true" : "false");
+    if (bWindowRefOverride)
+        LogInfo("Config Parse: [Debug - Scene] WindowRefOverride ACTIVE: view CB +0x594 (windowRef W) will be forced to windowRefH * aspect at >16:9 - flash-bars experiment #2; the first FIRED line prints the incoming value");
 
     // EdgeSnapIds = 123,456 - comma-separated element ids. Any non-digit run acts as
     // a separator; entries beyond the fixed capacity are dropped with a warning.
@@ -756,20 +854,26 @@ void GraphicalFixes()
                     static std::atomic<bool> logged{ false };
                     if (!logged.exchange(true)) LogInfo("FIRED: ScreenEffects");
 
-                    // v2.0.2 semantic change (hunt_scalecrop.txt): this store is the view
-                    // constant block's +0x59C, now a shader-consumed SCENE CROP FACTOR:
-                    // 1.0 = uncropped (what the game computes at 16:9), (H*16/9)/W at wider
-                    // aspect ratios (0.744186 at 21:9 = fill-width crop). v1's value
-                    // (fAspectMultiplier = 1.34375) is wrong here and was itself contributing
-                    // to the zoomed/cropped frame - write 1.0 so the scene spans the full
-                    // window width uncropped.
-                    if (fAspectRatio > fNativeAspect)
+                    // v2.0.2: this store is the view constant block's +0x59C, a
+                    // shader-consumed factor read by BOTH the scene pass and full-screen
+                    // combat-VFX quads (charge flashes / finisher overlays). The correct
+                    // value at any non-16:9 aspect is fAspectMultiplier (aspect / (16/9)):
+                    // field A/B at 3440x1440 with the FOV confound removed shows the scene
+                    // renders identically under 1.0 and 1.34375, while the VFX quads are
+                    // sized by this factor - shipping 1.0 left them at 16:9 width with
+                    // vertical bars on the 16:9 boundaries (GitHub issue #1). ADR-0004's
+                    // "fAspectMultiplier zooms the scene" diagnosis was confounded; see
+                    // ADR-0012.
+                    if (fAspectRatio != fNativeAspect)
                     {
-                        ctx.xmm0.f32[0] = 1.0f;
-                    }
-                    else if (fAspectRatio < fNativeAspect)
-                    {
-                        ctx.xmm0.f32[0] = 1.0f * fAspectMultiplier;
+                        ctx.xmm0.f32[0] = fAspectMultiplier;
+#ifdef GBFR_DEVBUILD
+                        // [Debug - Scene] CropFactorOverride (dev builds only): diagnostic
+                        // lever kept from the flash-bars hunt (ADR-0012); >= 0 replaces the
+                        // shipping value at >16:9.
+                        if (fAspectRatio > fNativeAspect && fCropFactorOverride >= 0.0f)
+                            ctx.xmm0.f32[0] = fCropFactorOverride;
+#endif // GBFR_DEVBUILD
                     }
                 });
         }
@@ -778,13 +882,111 @@ void GraphicalFixes()
             LogError("MISS: ScreenEffects pattern not found - feature disabled");
         }
     }
+
+#ifdef GBFR_DEVBUILD
+    // [Debug - Scene] WindowRefOverride experiment site (dev builds only; see the
+    // variable's comment block near the top of this file and docs/PATTERNS.md 3.23).
+    // Site = inside the view-CB producer (RVA 0x020D0E20), at the windowRef pair fill:
+    //   +0x00  vcvtsi2ss xmm1, xmm6, [rip->windowRefW]   (8 bytes, disp32 at +0x4)
+    //   +0x08  mov rdx, [rcx+0x2A0]                      (7 bytes)  <- HOOK (xmm1 = W)
+    //   +0x0F  vmovss [rdx+0x594], xmm1                  (8 bytes)
+    //   +0x17  vcvtsi2ss xmm1, xmm6, [rip->windowRefH]   (8 bytes, disp32 at +0x1B)
+    //   +0x1F  mov rdx, [rcx+0x2A0]                      (7 bytes)
+    //   +0x26  vmovss [rdx+0x598], xmm1                  (8 bytes)
+    // Verified unique on v2.0.2 @ RVA 0x020D10C5 (hook +0x8 = RVA 0x020D10CD; the
+    // stolen 7-byte mov has no rip-relative operand). The scan runs in EVERY dev build
+    // regardless of the ini key, so the HIT line doubles as a pattern-survival canary;
+    // the hook installs only when WindowRefOverride = true and the screen is >16:9.
+    {
+        uint8_t* WindowRefScanResult = Memory::PatternScan(baseModule,
+            "C5 CA 2A 0D ?? ?? ?? ?? 48 8B 91 A0 02 00 00 C5 FA 11 8A 94 05 00 00 "
+            "C5 CA 2A 0D ?? ?? ?? ?? 48 8B 91 A0 02 00 00 C5 FA 11 8A 98 05 00 00");
+        if (WindowRefScanResult)
+        {
+            LogInfo("HIT: WindowRefOverride site: %s+0x%llx (hook at +0x8)", sExeName.c_str(), ModOffset(WindowRefScanResult));
+
+            // Resolve both rip-relative int globals from the two vcvtsi2ss disp32
+            // fields (GetAbsolute64 takes the disp32 address; the instructions end at
+            // +0x8 / +0x1F). Expected on v2.0.2: W = 0x06B84098, H = 0x06B8409C.
+            // Logging their CURRENT values is itself evidence: at install time (after
+            // the injection delay) they show whether ResPublish already patched them.
+            uintptr_t windowRefWGlobal = Memory::GetAbsolute64((uintptr_t)WindowRefScanResult + 0x4);
+            uintptr_t windowRefHGlobal = Memory::GetAbsolute64((uintptr_t)WindowRefScanResult + 0x1B);
+            LogInfo("WindowRefOverride: windowRef globals at install: W %s+0x%llx = %d, H %s+0x%llx = %d",
+                sExeName.c_str(), ModOffset((const uint8_t*)windowRefWGlobal), *(volatile int*)windowRefWGlobal,
+                sExeName.c_str(), ModOffset((const uint8_t*)windowRefHGlobal), *(volatile int*)windowRefHGlobal);
+
+            if (!bWindowRefOverride)
+            {
+                LogInfo("WindowRefOverride: disabled (WindowRefOverride = false) - site verified, no hook installed");
+            }
+            else if (fAspectRatio <= fNativeAspect)
+            {
+                LogInfo("WindowRefOverride: aspect %g is not wider than 16:9 - hook not installed", fAspectRatio);
+            }
+            else
+            {
+                g_pWindowRefHGlobal = (volatile int*)windowRefHGlobal;
+                static SafetyHookMid WindowRefOverrideMidHook{};
+                WindowRefOverrideMidHook = safetyhook::create_mid(WindowRefScanResult + 0x8,
+                    [](SafetyHookContext& ctx)
+                    {
+                        // xmm1 = (float)windowRefW the game just converted, about to
+                        // be stored to CB +0x594. The +0x598 store a few instructions
+                        // later receives (float)windowRefH from its global
+                        // UNCONDITIONALLY (no [0x07032DE0]+0x65 branch, unlike the
+                        // render W/H pair at +0x58C/+0x590) - so the consistent
+                        // override that makes +0x594/+0x598 == the real screen aspect
+                        // is windowRefH * fAspectRatio, re-reading the SAME global the
+                        // +0x598 store is about to read. A hardcoded 1080*aspect would
+                        // give a wrong ratio whenever the global holds 1440.
+                        float incoming = ctx.xmm1.f32[0];
+                        int refH = *g_pWindowRefHGlobal;
+                        float overridden = (float)refH * fAspectRatio;
+                        ctx.xmm1.f32[0] = overridden;
+                        static std::atomic<bool> logged{ false };
+                        if (!logged.exchange(true))
+                            LogInfo("FIRED: WindowRefOverride (CB windowRef W in: %g -> %g; windowRefH global: %d)", incoming, overridden, refH);
+                    });
+                LogInfo("WindowRefOverride: hook installed - CB +0x594 will be forced to windowRefH * %g", fAspectRatio);
+            }
+        }
+        else
+        {
+            LogError("MISS: WindowRefOverride site pattern not found - experiment unavailable");
+        }
+    }
+#endif // GBFR_DEVBUILD
 }
 
 void AspectFOVFix()
 {
-    // [NEW 2026-07-10] ViewParamsFOV - gameplay FOV multiplier, derived from independent
-    // analysis of the v2.0.2 exe (build 0x6A3E573A), cross-validated against community
-    // ultrawide research.
+    // ============================== SCAN PHASE ==============================
+    // ORDERING IS LOAD-BEARING (ADR-0008/ADR-0011, docs/PATTERNS.md 3.5/3.17/3.19):
+    // the four aspect/FOV patterns below overlap each other's bytes at two sites, and
+    // installing a mid-hook rewrites bytes at its site (trampoline jmp), which would
+    // turn a later scan into a MISS:
+    //   - view-params site: the AspectRatio pattern (RVA 0x00751089, 0x37 bytes) spans
+    //     the ViewParamsFOV hook site (+0x20), and the ViewParamsFOV pattern starts at
+    //     the exact address the AspectRatio mid-hook patches (RVA 0x0075109A).
+    //   - projection-builder site: the ProjMatrixFOV pattern's first 13 bytes ARE the
+    //     ProjMatrixAspect pattern (both hit RVA 0x00750970), and the ProjMatrixAspect
+    //     mid-hook at +0x9 rewrites bytes +0x9..+0x10 inside the ProjMatrixFOV pattern.
+    // ALL FOUR scans therefore complete here before ANY of the four hooks installs.
+    // The installed hooks themselves coexist: at the builder the stolen ranges are
+    // +0x9..+0x10 vs +0x1A..+0x1E (the 9-byte vmulss between them stays intact); at
+    // the view-params site +0x11.. vs +0x20...
+
+    // [ROLE CHANGE 2026-07-10] ViewParamsFOV - culling/shared-view-constants FOV
+    // consistency. This hook does NOT change the rendered FOV (ADR-0011): the xmm3 it
+    // multiplies is stored only to [rsp+0x20] and passed to 0x0216ABE0, the culling /
+    // shared-view-constants builder; the projection matrix is built at RVA 0x00750970
+    // and re-reads the FOV FROM MEMORY [r14+0x9D4], out of this register's reach.
+    // (Diagnosed 2026-07-10: HIT and FIRED were both genuine - the hook ran, on the
+    // right value, at a site that cannot alter the image.) KEPT deliberately: with
+    // ProjMatrixFOV below widening the rendered frustum, this hook makes the culling
+    // path see the same multiplied FOV - without it, fFOVMulti > 1 culls objects
+    // against the narrower unmultiplied frustum and pops them at the screen edges.
     //
     // Pattern = the four adjacent view-params loads (viewport W/H, aspect, FOV):
     //   +0x00 vmovss xmm0,[rax+0x9A0]   ; viewport width
@@ -792,21 +994,13 @@ void AspectFOVFix()
     //   +0x10 vmovss xmm2,[rax+0x9D0]   ; aspect
     //   +0x18 vmovss xmm3,[rax+0x9D4]   ; FOV -> xmm3
     //   +0x20 vmovss [rsp+0x40],xmm11   ; <- hook here (after the FOV load)
-    // Expected unique hit RVA 0x0075109A. Hook at +0x20: xmm3 *= fFOVMulti - pure linear
-    // multiply, register only, no gating (no tan(), no cutscene exclusion, no aspect
-    // condition). Confidence: HIGH (site disasm verified against this exe).
+    // Expected unique hit RVA 0x0075109A. Hook at +0x20: xmm3 *= fFOVMulti - register
+    // only, same install gate as ProjMatrixFOV so the two stay in lockstep.
     //
     // NO hook is added at pattern+0x10 (the alternative aspect-force spot): our
     // AspectRatio hook below already force-writes [viewParams+0x9D0] = fAspectRatio at
     // this very site BEFORE the +0x10 load executes - duplicating the write here would
     // be redundant.
-    //
-    // ORDERING IS LOAD-BEARING: this pattern starts at RVA 0x0075109A - the exact
-    // address the AspectRatio mid-hook below is installed at - and the AspectRatio
-    // pattern (RVA 0x00751089, 0x37 bytes) also spans our +0x20 hook site. Installing
-    // either mid-hook rewrites bytes inside the other's pattern (trampoline jmp), so
-    // BOTH scans must complete before EITHER hook is installed. Scan here, install
-    // after the AspectRatio hook below.
     uint8_t* ViewParamsFOVScanResult = nullptr;
     if (fFOVMulti != (float)1)
     {
@@ -820,10 +1014,50 @@ void AspectFOVFix()
         }
         else
         {
-            LogError("MISS: ViewParamsFOV pattern not found - gameplay FOV multiplier disabled");
+            LogError("MISS: ViewParamsFOV pattern not found - culling will not match the multiplied FOV (edge pop-in possible at multipliers > 1)");
         }
     }
 
+    // [NEW 2026-07-10] ProjMatrixFOV - THE rendered gameplay-FOV multiplier (ADR-0011).
+    // Site = the projection-matrix builder @ RVA 0x00750970 (the same site
+    // ProjMatrixAspect hooks): dirty(+0x9DE)-triggered, and it serves EVERY camera
+    // whose dirty flag is set - gameplay, cutscenes, menu 3D scenes. There is no clean
+    // "is gameplay" discriminator at this site, so the multiplier is GLOBAL BY DESIGN
+    // (cutscenes are also affected; default 1.0 = off).
+    //   +0x00 vmovss xmm8,[r14+0x9D0]      ; aspect (ProjMatrixAspect overrides at +0x9)
+    //   +0x09 vmovss xmm7,[rip+...]        ; = 0.5
+    //   +0x11 vmulss xmm0,xmm7,[r14+0x9D4] ; xmm0 = FOV/2 - FOV read FROM MEMORY
+    //   +0x1A call tanf                    ; <- hook here: xmm0 *= fFOVMulti before tan()
+    //   +0x1F ...                          ; yscale = 1/tan(FOV/2); xscale = yscale/aspect
+    // Pattern = the ProjMatrixAspect pattern extended through the vmulss and the call
+    // opcode; expected unique hit RVA 0x00750970. Hook +0x1A steals exactly the 5-byte
+    // E8 call (safetyhook relocates the rel32; the hook body runs BEFORE the relocated
+    // call, which is what we need). tan((m*FOV)/2) is an exact angular multiply; yscale
+    // AND xscale both follow, so the frustum widens consistently on both axes.
+    //
+    // NEVER write [obj+0x9D4] memory instead: 14+ rip-visible writers rewrite that
+    // field (several per-frame) - a memory multiply is either overwritten (no effect)
+    // or, placed after a per-frame writer, compounds every frame and explodes within a
+    // second. A register multiply at the final consumer is immune to both.
+    uint8_t* ProjMatrixFOVScanResult = nullptr;
+    if (fFOVMulti != (float)1)
+    {
+        std::vector<uint8_t*> ProjMatrixFOVHits = Memory::PatternScanAll(baseModule, "C4 41 7A 10 86 D0 09 00 00 C5 FA 10 3D ?? ?? ?? ?? C4 C1 42 59 86 D4 09 00 00 E8");
+        if (!ProjMatrixFOVHits.empty())
+        {
+            if (ProjMatrixFOVHits.size() != 1)
+                LogError("WARN: ProjMatrixFOV: expected unique hit, found %zu - hooking the first only", ProjMatrixFOVHits.size());
+            ProjMatrixFOVScanResult = ProjMatrixFOVHits[0];
+            LogInfo("HIT: ProjMatrixFOV: %s+0x%llx (hook at +0x1A, multiplier %g)", sExeName.c_str(), ModOffset(ProjMatrixFOVScanResult), fFOVMulti);
+        }
+        else
+        {
+            LogError("MISS: ProjMatrixFOV pattern not found - gameplay FOV multiplier disabled");
+        }
+    }
+
+    uint8_t* AspectRatioScanResult = nullptr;
+    uint8_t* ProjMatrixScanResult = nullptr;
     if (bAspectFix)
     {
         // [REFOUND v2.0.2] Aspect Ratio: only change vs v1 is byte[2] 49 -> 48 - v1's
@@ -831,48 +1065,29 @@ void AspectFOVFix()
         // change only). Verified unique hit at RVA 0x00751089; hook at +0x11 (first vmovss)
         // unchanged. Camera struct unchanged: +0x9D0 = aspect, +0x9D4 = FOV (writer site
         // verified at RVA 0x00691D3A: vdivss w/h then vmovss [rdx+0x9D0]).
-        uint8_t* AspectRatioScanResult = Memory::PatternScan(baseModule, "74 ?? 48 ?? ?? 48 ?? ?? ?? ?? ?? 00 48 ?? ?? 74 ?? C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ??");
+        AspectRatioScanResult = Memory::PatternScan(baseModule, "74 ?? 48 ?? ?? 48 ?? ?? ?? ?? ?? 00 48 ?? ?? 74 ?? C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ?? ?? 00 C5 ?? ?? ?? ?? ??");
         if (AspectRatioScanResult)
         {
-            LogInfo("HIT: AspectRatio: %s+0x%llx", sExeName.c_str(), ModOffset(AspectRatioScanResult));
-
-            static SafetyHookMid AspectRatioMidHook{};
-            AspectRatioMidHook = safetyhook::create_mid(AspectRatioScanResult + 0x11,
-                [](SafetyHookContext& ctx)
-                {
-                    static std::atomic<bool> logged{ false };
-                    if (!logged.exchange(true)) LogInfo("FIRED: AspectRatio");
-
-                    *reinterpret_cast<float*>(ctx.rax + 0x9D0) = fAspectRatio;
-                });
+            LogInfo("HIT: AspectRatio: %s+0x%llx (hook at +0x11)", sExeName.c_str(), ModOffset(AspectRatioScanResult));
         }
         else
         {
             LogError("MISS: AspectRatio pattern not found - feature disabled");
         }
 
-        // [NEW v2.0.2] Projection-matrix builder (hunt_present_path.txt): the hook above
-        // feeds only a secondary consumer (culling/shared constants at 0x0216ABE0). The REAL
-        // projection matrix is built earlier in the same function, at RVA 0x00750970:
-        // dirty(+0x9DE)-triggered, xscale = 1/tan(fov/2)/aspect, writes camera +0x40/+0x100.
-        // Data-driven 16:9 aspect writers (e.g. cutscene camera data via 0x00ECFA78) set the
-        // dirty flag themselves, so their value always reaches the matrix first - overriding
-        // xmm8 right after "vmovss xmm8,[r14+0x9D0]" (9 bytes, hence +0x9) covers every
-        // camera and every aspect source.
-        uint8_t* ProjMatrixScanResult = Memory::PatternScan(baseModule, "C4 41 7A 10 86 D0 09 00 00 C5 FA 10 3D");
+        // [NEW v2.0.2] Projection-matrix builder (hunt_present_path.txt): the AspectRatio
+        // hook feeds only a secondary consumer (culling/shared constants at 0x0216ABE0).
+        // The REAL projection matrix is built earlier in the same function, at RVA
+        // 0x00750970: dirty(+0x9DE)-triggered, xscale = 1/tan(fov/2)/aspect, writes camera
+        // +0x40/+0x100. Data-driven 16:9 aspect writers (e.g. cutscene camera data via
+        // 0x00ECFA78) set the dirty flag themselves, so their value always reaches the
+        // matrix first - overriding xmm8 right after "vmovss xmm8,[r14+0x9D0]" (9 bytes,
+        // hence +0x9) covers every camera and every aspect source. ProjMatrixFOV (above)
+        // extends this same pattern - see the scan-phase ordering note.
+        ProjMatrixScanResult = Memory::PatternScan(baseModule, "C4 41 7A 10 86 D0 09 00 00 C5 FA 10 3D");
         if (ProjMatrixScanResult)
         {
             LogInfo("HIT: ProjMatrixAspect: %s+0x%llx (hook at +0x9)", sExeName.c_str(), ModOffset(ProjMatrixScanResult));
-
-            static SafetyHookMid ProjMatrixAspectMidHook{};
-            ProjMatrixAspectMidHook = safetyhook::create_mid(ProjMatrixScanResult + 0x9,
-                [](SafetyHookContext& ctx)
-                {
-                    static std::atomic<bool> logged{ false };
-                    if (!logged.exchange(true)) LogInfo("FIRED: ProjMatrixAspect");
-
-                    ctx.xmm8.f32[0] = fAspectRatio;
-                });
         }
         else
         {
@@ -880,8 +1095,61 @@ void AspectFOVFix()
         }
     }
 
-    // ViewParamsFOV install (scan done above, before the AspectRatio hook rewrote the
-    // site bytes). Only installed when fFOVMulti != 1.0 - at 1.0 the multiply is a no-op.
+    // ============================= INSTALL PHASE =============================
+    // All four aspect/FOV scans above are complete - installing may now rewrite site
+    // bytes freely. Do NOT scan any of the four patterns after this point.
+    if (AspectRatioScanResult)
+    {
+        static SafetyHookMid AspectRatioMidHook{};
+        AspectRatioMidHook = safetyhook::create_mid(AspectRatioScanResult + 0x11,
+            [](SafetyHookContext& ctx)
+            {
+                static std::atomic<bool> logged{ false };
+                if (!logged.exchange(true)) LogInfo("FIRED: AspectRatio");
+
+#ifdef GBFR_DEVBUILD
+                // rax = camera/view-params object - cache it for DiagCamDistWatchdog.
+                g_DiagCamObj.store(ctx.rax, std::memory_order_relaxed);
+#endif // GBFR_DEVBUILD
+                *reinterpret_cast<float*>(ctx.rax + 0x9D0) = fAspectRatio;
+            });
+    }
+
+    if (ProjMatrixScanResult)
+    {
+        static SafetyHookMid ProjMatrixAspectMidHook{};
+        ProjMatrixAspectMidHook = safetyhook::create_mid(ProjMatrixScanResult + 0x9,
+            [](SafetyHookContext& ctx)
+            {
+                static std::atomic<bool> logged{ false };
+                if (!logged.exchange(true)) LogInfo("FIRED: ProjMatrixAspect");
+
+#ifdef GBFR_DEVBUILD
+                // r14 = camera object in the projection-matrix builder - cache it
+                // for DiagCamDistWatchdog.
+                g_DiagCamObj.store(ctx.r14, std::memory_order_relaxed);
+#endif // GBFR_DEVBUILD
+                ctx.xmm8.f32[0] = fAspectRatio;
+            });
+    }
+
+    // ProjMatrixFOV install. Only when fFOVMulti != 1.0 - at 1.0 the multiply is a no-op.
+    if (ProjMatrixFOVScanResult)
+    {
+        static SafetyHookMid ProjMatrixFOVMidHook{};
+        ProjMatrixFOVMidHook = safetyhook::create_mid(ProjMatrixFOVScanResult + 0x1A,
+            [](SafetyHookContext& ctx)
+            {
+                static std::atomic<bool> logged{ false };
+                if (!logged.exchange(true)) LogInfo("FIRED: ProjMatrixFOV (base FOV %g x%g)", ctx.xmm0.f32[0] * 2.0f, fFOVMulti);
+
+                // xmm0 = FOV/2 (radians), on its way into tanf. Register-only multiply -
+                // [obj+0x9D4] game memory stays untouched (see the scan comment).
+                ctx.xmm0.f32[0] *= fFOVMulti;
+            });
+    }
+
+    // ViewParamsFOV install - the culling-consistency companion of ProjMatrixFOV.
     if (ViewParamsFOVScanResult)
     {
         static SafetyHookMid ViewParamsFOVMidHook{};
@@ -889,64 +1157,138 @@ void AspectFOVFix()
             [](SafetyHookContext& ctx)
             {
                 static std::atomic<bool> logged{ false };
-                if (!logged.exchange(true)) LogInfo("FIRED: ViewParamsFOV (base FOV %g x%g)", ctx.xmm3.f32[0], fFOVMulti);
+                if (!logged.exchange(true)) LogInfo("FIRED: ViewParamsFOV (culling-path base FOV %g x%g)", ctx.xmm3.f32[0], fFOVMulti);
 
-                // FOV was just loaded from [viewParams+0x9D4] into xmm3; every downstream
-                // consumer sees the scaled value, game memory stays unmodified.
+                // FOV was just loaded from [viewParams+0x9D4] into xmm3; this register
+                // feeds ONLY the culling/shared-view-constants call (no visual effect) -
+                // kept in lockstep with ProjMatrixFOV so edge objects are not culled
+                // against the unmultiplied frustum. Game memory stays unmodified.
                 ctx.xmm3.f32[0] *= fFOVMulti;
             });
     }
 
-    // [REFOUND v2.0.2 - PARTIAL] Gameplay Camera: the v1 pattern died because the sender
-    // switched to an rbp frame (5-byte stores, was 6-byte rsp+SIB) and hoisted
-    // "mov rax,[rsi+0x4358]" above the float loads. The new pattern anchors the three
-    // load+store pairs plus the following test/jz; verified unique hit at RVA 0x009D8C70.
+    // [REMOVED 2026-07-10] GameplayCamera distance hook (v1-relocated message-block
+    // site, unique hit RVA 0x009D8C70, hook +0x8, xmm9 *= fCamDistMulti): the pattern
+    // HIT but the hook never FIRED in any session - v2.0.2 gameplay no longer drives
+    // the camera through that message path. Deleted so the distance cannot be
+    // multiplied TWICE through the live families below if the message path ever
+    // revives. Historical notes - incl. the "v1 FOV slot is now pitch, hooking it
+    // tilts the camera" trap - are kept in docs/PATTERNS.md 3.6.
     //
-    // Only HALF of the v1 feature can be restored here. The camera message this site
-    // builds changed layout: v1 sent {id, dist, FOV, yaw}, v2.0.2 sends {id, dist, pitch,
-    // yaw}. The old FOV slot (v1 hook2's xmm10, now loaded via xmm7 at pattern+0xD) carries
-    // a pitch angle in radians - readers multiply it by 1/(2*pi) to count turns, negate it
-    // via sign-bit XOR, and wrap it into [-pi, pi) - so a v1-style FOV hook here would tilt
-    // the camera instead of zooming. The FOV hook is therefore intentionally NOT installed.
-    // Closest substitute would be the camera-blackboard flush sites (the 4 CutsceneFOV
-    // inline hits, fov in xmm2 lane0), but those also affect cutscenes - not adopted.
-    uint8_t* GameplayCameraScanResult = Memory::PatternScan(baseModule, "C5 7A 10 ?? ?? ?? 00 00 C5 7A 11 ?? ?? C5 FA 10 ?? ?? ?? 00 00 C5 FA 11 ?? ?? C5 7A 10 ?? ?? ?? 00 00 C5 7A 11 ?? ?? 48 85 C0 74");
-    if (GameplayCameraScanResult)
+    // [NEW 2026-07-10] Camera distance multiplier - three live hook families, derived
+    // from community ultrawide research for this exe build and re-verified offline
+    // instruction-by-instruction (docs/PATTERNS.md 3.20-3.22). The three sites do not
+    // overlap each other (or anything else we hook), so plain scan+install per family
+    // is safe here - no ordering constraint like the aspect/FOV block above.
+    if (fCamDistMulti != (float)1)
     {
-        LogInfo("HIT: GameplayCamera: %s+0x%llx", sExeName.c_str(), ModOffset(GameplayCameraScanResult));
-
-        static SafetyHookMid GameplayCamDistMidHook{};
-        // v2.0.2: hook at +0x8 (instruction boundary before "vmovss [rbp-0x14],xmm9") -
-        // distance is already loaded into xmm9 (v1: xmm8) and not yet written to the
-        // message block. The multiplied value still goes through the game's own per-area
-        // distance clamps (300cm indoor / 800cm general) afterwards.
-        GameplayCamDistMidHook = safetyhook::create_mid(GameplayCameraScanResult + 0x8,
-            [](SafetyHookContext& ctx)
-            {
-                // Run camera distance multiplier
-                if (fCamDistMulti != (float)1)
-                {
-                    ctx.xmm9.f32[0] *= fCamDistMulti;
-                }
-            });
-
-        // No v1-style FOV hook at THIS site on v2.0.2 (see block comment above) - the
-        // gameplay FOV multiplier is now delivered by the ViewParamsFOV hook installed
-        // earlier in this function instead. What remains unported is bFOVFix's <16:9
-        // vert- compensation (v1 divided the camera-message FOV by fAspectMultiplier);
-        // the ViewParamsFOV hook is a plain multiplier with no aspect term.
-        if (bFOVFix && (fAspectRatio < fNativeAspect))
+        // F1 - CamDistPreset (primary effect): the four inlined "apply active camera
+        // preset" sites that publish the preset's distance [rcx+0x14] (meters, default
+        // 4.8) to the global camera-params block [0x07C25720]:
+        //   +0x00 vmovss xmm0,[rcx+0x14]   ; rcx = active preset, +0x14 = distance
+        //   +0x05 vmovss [rip->global],xmm0 ; publish  <- hook lands ON this boundary
+        //   +0x0D vmovaps xmm0,[rcx+0x30]  ; rest of the block copy (FOV +0x18, ...)
+        // Expected 4 hits (RVA 0x0095A91F / 0x01F9245F / 0x0268DA8F / 0x02DB617F) -
+        // branch/caller copies; which one runs depends on game mode, so hook ALL FOUR
+        // (like GfxCorruption; over-hooking is harmless, each publish is scaled exactly
+        // once). Hook +0x5: after the 5-byte load, before the 8-byte rip-relative
+        // publish store (safetyhook relocates the rip operand - same class as our
+        // FPSCap/Nameplate sites). Multiplying the PUBLISHED value never compounds:
+        // the preset source field is never written, so re-publishing starts from the
+        // unscaled 4.8 every time.
+        std::vector<uint8_t*> CamDistPresetHits = Memory::PatternScanAll(baseModule, "C5 FA 10 41 14 C5 FA 11 05 ?? ?? ?? ?? C5 F8 28 41 30 C5 F8");
+        if (!CamDistPresetHits.empty())
         {
-            LogWarn("Gameplay FOV vert- compensation is NOT SUPPORTED on game v2.0.2 (the camera message no longer carries FOV) - gameplay FOV stays uncorrected below 16:9");
+            LogInfo("HIT: CamDistPreset: %zu hit(s)", CamDistPresetHits.size());
+            if (CamDistPresetHits.size() != 4)
+                LogError("WARN: CamDistPreset: expected 4 hits, found %zu - hooking all of them anyway", CamDistPresetHits.size());
+
+            static std::vector<SafetyHookMid> CamDistPresetMidHooks;
+            for (uint8_t* hit : CamDistPresetHits)
+            {
+                LogInfo("HIT: CamDistPreset: %s+0x%llx (hook at +0x5)", sExeName.c_str(), ModOffset(hit));
+                CamDistPresetMidHooks.push_back(safetyhook::create_mid(hit + 0x5,
+                    [](SafetyHookContext& ctx)
+                    {
+                        static std::atomic<bool> logged{ false };
+                        if (!logged.exchange(true)) LogInfo("FIRED: CamDistPreset (dist %g -> %g)", ctx.xmm0.f32[0], ctx.xmm0.f32[0] * fCamDistMulti);
+
+                        ctx.xmm0.f32[0] *= fCamDistMulti;
+                    }));
+            }
         }
-    }
-    else
-    {
-        LogError("MISS: GameplayCamera pattern not found - feature disabled");
+        else
+        {
+            LogError("MISS: CamDistPreset pattern not found - camera distance multiplier (preset path) disabled");
+        }
+
+        // F2 - FollowCamDist: the follow-camera's 1/2/3-channel zoom-track selector
+        // (popcnt on a channel mask) loads the zoom value into xmm8 from
+        // [rdi+0x17C/+0x180/+0x184] (or vxorps xmm8 when no channel); all arms converge
+        // on "vxorps xmm9,xmm9,xmm9" at +0x23 - hook there (5-byte insn, boundary
+        // verified; next insn "mov rax,[rsi]" confirms a clean split). The value is a
+        // NORMALIZED [0..1] pull-back fraction, NOT meters - downstream the game
+        // computes dist = min(1, max(0, xmm8+xmm7)) when flag [obj+0x5B5C]&0x80 is set,
+        // so a multiplier > 1 pulls back and SATURATES at the far end of the zoom
+        // range via that clamp (expected behavior).
+        uint8_t* FollowCamDistScanResult = Memory::PatternScan(baseModule, "C5 7A 10 ?? 7C 01 00 00 EB ?? C4 41 38 57 C0 EB ?? C5 7A 10 ?? 80 01 00 00 EB ?? C5 7A 10 ?? 84 01 00 00 C4 41 30 57 C9");
+        if (FollowCamDistScanResult)
+        {
+            LogInfo("HIT: FollowCamDist: %s+0x%llx (hook at +0x23)", sExeName.c_str(), ModOffset(FollowCamDistScanResult));
+
+            static SafetyHookMid FollowCamDistMidHook{};
+            FollowCamDistMidHook = safetyhook::create_mid(FollowCamDistScanResult + 0x23,
+                [](SafetyHookContext& ctx)
+                {
+                    static std::atomic<bool> logged{ false };
+                    if (!logged.exchange(true)) LogInfo("FIRED: FollowCamDist (zoom %g -> %g)", ctx.xmm8.f32[0], ctx.xmm8.f32[0] * fCamDistMulti);
+
+                    // xmm8 may be 0 on the vxorps arm - multiplying is harmless there.
+                    ctx.xmm8.f32[0] *= fCamDistMulti;
+                });
+        }
+        else
+        {
+            LogError("MISS: FollowCamDist pattern not found - camera distance multiplier (follow-cam path) disabled");
+        }
+
+        // F3 - RoamCamDist: free-roam camera config copy (same camera-apply function
+        // family as CamDistPreset hit #1):
+        //   +0x00 vmovss xmm0,[rsi+0x38]   ; free-roam distance
+        //   +0x05 vmovss [rcx+0x54],xmm0   ; <- hook here
+        //   +0x0A vmovss xmm0,[rsi+0x3C]   ; second field - intentionally NOT scaled
+        //   +0x0F vmovss [rcx+0x58],xmm0
+        // Expected unique hit RVA 0x0095A625; hook +0x5 (after the load, before the
+        // 5-byte store). Only the copied value is scaled; the source [rsi+0x38] is
+        // untouched, so re-copies never compound.
+        uint8_t* RoamCamDistScanResult = Memory::PatternScan(baseModule, "C5 FA 10 ?? 38 C5 FA 11 ?? 54 C5 FA 10 ?? 3C C5 FA 11 ?? 58");
+        if (RoamCamDistScanResult)
+        {
+            LogInfo("HIT: RoamCamDist: %s+0x%llx (hook at +0x5)", sExeName.c_str(), ModOffset(RoamCamDistScanResult));
+
+            static SafetyHookMid RoamCamDistMidHook{};
+            RoamCamDistMidHook = safetyhook::create_mid(RoamCamDistScanResult + 0x5,
+                [](SafetyHookContext& ctx)
+                {
+                    static std::atomic<bool> logged{ false };
+                    if (!logged.exchange(true)) LogInfo("FIRED: RoamCamDist (dist %g -> %g)", ctx.xmm0.f32[0], ctx.xmm0.f32[0] * fCamDistMulti);
+
+                    ctx.xmm0.f32[0] *= fCamDistMulti;
+                });
+        }
+        else
+        {
+            LogError("MISS: RoamCamDist pattern not found - camera distance multiplier (free-roam path) disabled");
+        }
     }
 
     if (bFOVFix && (fAspectRatio < fNativeAspect))
     {
+        // What remains unported from v1 is the <16:9 vert- gameplay-FOV compensation
+        // (v1 divided the camera-message FOV by fAspectMultiplier; v2.0.2's camera
+        // message no longer carries FOV, and ProjMatrixFOV is a plain multiplier with
+        // no aspect term).
+        LogWarn("Gameplay FOV vert- compensation is NOT SUPPORTED on game v2.0.2 (the camera message no longer carries FOV) - gameplay FOV stays uncorrected below 16:9");
         // [FIXED v2.0.2] Cutscene FOV: 4 hits, PatternScan returns the first.
         // All 4 hits are identical inlined copies of the cutscene path; only the first is hooked for now.
         // This hook is only installed when fAspectRatio < 16:9, so 21:9 users are unaffected either way.
@@ -1098,6 +1440,13 @@ void HUDFix()
         //   would land MID-INSTRUCTION in this exe (an off-by-one seen in the wild, never
         //   exercised - it only installs at <16:9); the correct post-load boundary is
         //   pattern+0x58 = our base+0x29, which is what we already use. KEEP base+0x29.
+        //
+        // [Debug - Backgrounds] Probe = true (dev builds only - release builds compile
+        // it out) logs every unique object id flowing through the >16:9 width hook
+        // (first 512) as a greppable "PROBE-BG:" line with id/size/widen-verdict - the
+        // capture workflow for full-screen overlay quads that still render at 16:9
+        // width because their id is not in BackgroundWidthIDs (e.g. the Io
+        // charge-complete flash, GitHub issue #1).
         uint8_t* UIBackgroundsScanResult = Memory::PatternScan(baseModule, "41 ?? ?? ?? ?? 00 E8 ?? ?? ?? ?? 80 ?? ?? ?? 00 0F ?? ?? ?? ?? ?? 48 ?? ?? ?? ?? 48 ?? ?? E8 ?? ?? ?? ?? 48 ?? ?? ?? C5 ?? ?? ?? ?? ?? ?? 00");
         if (UIBackgroundsScanResult)
         {
@@ -1124,6 +1473,48 @@ void HUDFix()
                         int iObjectID = *reinterpret_cast<int*>(ctx.rax + 0x1C4);
                         float fObjectWidth = *reinterpret_cast<float*>(ctx.rax + 0x1BC);
                         float fObjectHeight = *reinterpret_cast<float*>(ctx.rax + 0x1C0);
+
+#ifdef GBFR_DEVBUILD
+                        // Probe diagnostic ([Debug - Backgrounds] Probe, dev builds
+                        // only): one greppable PROBE-BG line per unique object id
+                        // (first 512 - menus/lobby alone consume ~100 unique ids, and
+                        // 64 slots were exhausted ~30s after boot before any combat
+                        // VFX could appear; field-tested 2026-07-10) - ALL ids
+                        // passing this site, not only w==3840, in
+                        // case a target quad is authored at a non-3840 width. Capture
+                        // workflow for un-whitelisted full-screen overlay quads (e.g.
+                        // the Io charge-complete flash, GitHub issue #1): ids whose
+                        // FIRST sighting lands at the artifact moment are the
+                        // candidates to add to BackgroundWidthIDs. A single bool check
+                        // when disabled; release builds compile this whole block out.
+                        if (bBackgroundProbe)
+                        {
+                            constexpr int kBgProbeCap = 512;
+                            static std::mutex bgProbeMtx;
+                            static uint32_t bgProbeSeen[kBgProbeCap];
+                            static int bgProbeCount = 0;
+
+                            std::lock_guard<std::mutex> lock(bgProbeMtx);
+                            bool bSeen = false;
+                            for (int i = 0; i < bgProbeCount; ++i)
+                            {
+                                if (bgProbeSeen[i] == (uint32_t)iObjectID) { bSeen = true; break; }
+                            }
+                            if (!bSeen && bgProbeCount < kBgProbeCap)
+                            {
+                                bgProbeSeen[bgProbeCount++] = (uint32_t)iObjectID;
+                                // Verdict mirrors the widen logic below.
+                                const char* verdict = "not-widened";
+                                if (fObjectWidth == (float)3840 &&
+                                    std::find(BackgroundWidthIDs.begin(), BackgroundWidthIDs.end(), iObjectID) != BackgroundWidthIDs.end())
+                                    verdict = "list-hit";
+                                else if (bSpanAllBackgrounds && fObjectWidth == (float)3840 && fObjectHeight == (float)2160)
+                                    verdict = "spanall";
+                                LogInfo("PROBE-BG: #%d id=%u w=%.0f h=%.0f verdict=%s",
+                                    bgProbeCount, (uint32_t)iObjectID, fObjectWidth, fObjectHeight, verdict);
+                            }
+                        }
+#endif // GBFR_DEVBUILD
 
                         // If it is 3840px wide then it must span the entire screen
                         if (fObjectWidth == (float)3840)
@@ -1223,7 +1614,7 @@ void HUDFix()
         // unlike the removed v1 marker-based struct writes.
         //
         // [Debug - Span HUD] Probe = true (dev builds only) additionally logs every
-        // unique child id that flows through here (bounded, first 200) with geometry +
+        // unique child id that flows through here (bounded, first 512) with geometry +
         // verdict - the workflow for discovering ids to feed into EdgeSnapIds /
         // MoveIds. Costs one bool check when disabled; release builds compile the
         // whole probe machinery out (probeLog becomes a no-op).
@@ -1263,15 +1654,18 @@ void HUDFix()
 
 #ifdef GBFR_DEVBUILD
                     // Probe diagnostic ([Debug - Span HUD] Probe, dev builds only): one
-                    // greppable line per unique child id (first 200), logged at the point
-                    // the verdict for this pass is known. Dedup means each id gets its
-                    // FIRST verdict only. A single bool check when disabled.
+                    // greppable line per unique child id (first 512 - same capacity
+                    // bump as PROBE-BG: menu traffic alone can eat hundreds of unique
+                    // ids before the interesting combat elements appear), logged at
+                    // the point the verdict for this pass is known. Dedup means each
+                    // id gets its FIRST verdict only. A single bool check when disabled.
                     auto probeLog = [&](const char* verdict)
                     {
                         if (!bHUDProbe)
                             return;
+                        constexpr int kHudProbeCap = 512;
                         static std::mutex probeMtx;
-                        static uint32_t probeSeen[200];
+                        static uint32_t probeSeen[kHudProbeCap];
                         static int probeCount = 0;
 
                         std::lock_guard<std::mutex> lock(probeMtx);
@@ -1279,7 +1673,7 @@ void HUDFix()
                         {
                             if (probeSeen[i] == childId) return;
                         }
-                        if (probeCount >= 200)
+                        if (probeCount >= kHudProbeCap)
                             return;
                         probeSeen[probeCount++] = childId;
                         LogInfo("PROBE: parent=%u child=%u wh=%gx%g anchors=%g/%g px=%g verdict=%s",
@@ -1733,6 +2127,119 @@ static void DiagDump()
     LogInfo("DIAG: swapchain=%ux%u | uiCachedW=%u", rd(0x07193038), rd(0x07193040), rd(0x07021290));
 }
 
+#ifdef GBFR_DEVBUILD
+// [DEV 2026-07-10] DIAG-CAMDIST - camera-distance live watchdog (dev builds only).
+//
+// Why it exists: two static hunts for the live camera-distance path both produced
+// hooks that HIT but never FIRED across full gameplay sessions (first the
+// v1-relocated GameplayCamera message site, then the community-derived
+// CamDistPreset x4 / FollowCamDist / RoamCamDist trio - see AspectFOVFix). The next
+// hunt has to be observation-driven, so this watchdog runs on the Main thread after
+// DiagDump and samples every ~2s, logging ONLY on change (bounded per stream):
+//
+//   1) The published preset-distance global [exe+0x07C25720] (float, meters,
+//      default 4.8 - PATTERNS.md 2.5 / FOV_CAMDIST_SPEC Bug B). Interpretation:
+//      - value NEVER changes while the in-game camera visibly zooms in/out
+//        (lock-on, combat pull-back, indoor cameras) => the global is a COLD
+//        preset copy, not the live distance; stop hunting its writers.
+//      - value tracks visible camera-distance changes => the global IS live and
+//        the preset-publish path just runs before our scan; re-hunt its writers
+//        (e.g. hardware write-watch on 0x07C25720).
+//
+//   2) The most recent camera/view-params object cached by the AspectRatio /
+//      ProjMatrixAspect hooks (g_DiagCamObj): +0x9D0 aspect, +0x9D4 FOV(radians).
+//      These are the only two float fields FOV_CAMDIST_SPEC verifies on this
+//      struct; the spec names NO distance field on it (the preset struct's +0x14
+//      and the roam-config +0x38/+0x54 copies live on DIFFERENT structs), so no
+//      distance-candidate window is scanned here - observation only, no guessing.
+//
+// Reads are VirtualQuery-guarded (same defensive practice as the pattern scanner,
+// ADR-0002): the exe global is always committed, but the cached camera object can
+// go stale between hook fire and watchdog tick.
+static bool DiagSafeReadFloat(uintptr_t addr, float* out)
+{
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)))
+        return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        return false;
+    constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(mbi.Protect & kReadable))
+        return false;
+    *out = *reinterpret_cast<const volatile float*>(addr);
+    return true;
+}
+
+static void DiagCamDistWatchdog()
+{
+    constexpr int kMaxLines = 64; // change-line budget PER STREAM per session
+    const uintptr_t presetGlobal = (uintptr_t)baseModule + 0x07C25720;
+
+    float fLastPreset = 0.0f;
+    bool  bHavePreset = false;
+    int   iPresetLines = 0;
+
+    float fLastAspect = 0.0f, fLastFov = 0.0f;
+    bool  bHaveCam = false;
+    int   iCamLines = 0;
+
+    LogInfo("DIAG-CAMDIST: watchdog armed - sampling preset-distance global %s+0x7C25720 "
+        "(meters, default 4.8) and latest camera object (+0x9D0 aspect / +0x9D4 FOV) every 2s; "
+        "log-on-change only, max %d lines per stream", sExeName.c_str(), kMaxLines);
+
+    while (iPresetLines < kMaxLines || iCamLines < kMaxLines)
+    {
+        Sleep(2000);
+
+        // Stream 1: preset-distance global.
+        if (iPresetLines < kMaxLines)
+        {
+            float v = 0.0f;
+            if (DiagSafeReadFloat(presetGlobal, &v) && (!bHavePreset || v != fLastPreset))
+            {
+                if (!bHavePreset)
+                    LogInfo("DIAG-CAMDIST: preset global baseline %g (%s+0x7C25720; "
+                        "watch whether this EVER moves when the in-game camera zooms)",
+                        v, sExeName.c_str());
+                else
+                    LogInfo("DIAG-CAMDIST: preset global %g -> %g", fLastPreset, v);
+                fLastPreset = v;
+                bHavePreset = true;
+                ++iPresetLines;
+            }
+        }
+
+        // Stream 2: cached camera object fields. Compared by VALUE (not pointer)
+        // so several camera objects alternating with identical aspect/FOV do not
+        // burn the line budget; the pointer is still printed for context.
+        if (iCamLines < kMaxLines)
+        {
+            const uintptr_t cam = g_DiagCamObj.load(std::memory_order_relaxed);
+            float fAspect = 0.0f, fFov = 0.0f;
+            if (cam
+                && DiagSafeReadFloat(cam + 0x9D0, &fAspect)
+                && DiagSafeReadFloat(cam + 0x9D4, &fFov)
+                && (!bHaveCam || fAspect != fLastAspect || fFov != fLastFov))
+            {
+                if (!bHaveCam)
+                    LogInfo("DIAG-CAMDIST: camera obj 0x%llx baseline aspect=%g fov=%g rad (%.1f deg)",
+                        (unsigned long long)cam, fAspect, fFov, fFov * 180.0f / 3.14159265f);
+                else
+                    LogInfo("DIAG-CAMDIST: camera obj 0x%llx aspect %g -> %g | fov %g -> %g rad (%.1f deg)",
+                        (unsigned long long)cam, fLastAspect, fAspect, fLastFov, fFov,
+                        fFov * 180.0f / 3.14159265f);
+                fLastAspect = fAspect;
+                fLastFov = fFov;
+                bHaveCam = true;
+                ++iCamLines;
+            }
+        }
+    }
+    LogInfo("DIAG-CAMDIST: all change-line budgets exhausted - watchdog stopped");
+}
+#endif // GBFR_DEVBUILD
+
 DWORD __stdcall Main(void*)
 {
     Logging();
@@ -1747,6 +2254,11 @@ DWORD __stdcall Main(void*)
     GraphicalTweaks();
     FPSCap();
     DiagDump();
+#ifdef GBFR_DEVBUILD
+    // Dev builds: the Main thread has nothing left to do, so it becomes the
+    // DIAG-CAMDIST sampling thread (returns once all change budgets are spent).
+    DiagCamDistWatchdog();
+#endif // GBFR_DEVBUILD
     return true;
 }
 
