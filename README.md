@@ -32,44 +32,69 @@ the game updates again — see [`docs/PATTERNS.md`](docs/PATTERNS.md).
 | HUD locked & centred to 16:9 | `[Fix HUD]` | Keeps the HUD readable and centred instead of stretched across the full width. |
 | Span HUD | `[Span HUD]` | Optionally spans the gameplay HUD to a chosen aspect (`SpanAllHUD`, `SpanAllBackgrounds`). |
 | Span backgrounds | `[Fix HUD]` / `[Span HUD]` | Fades, menus, and full-screen backgrounds fill the whole screen. |
+| Nameplate fix | `[Fix Nameplates]` | Keeps world-anchored nameplates (floating name/speech labels) correctly positioned and scaled at `>16:9`. Only active when the screen is wider than 16:9. |
+| Combat-flash / VFX fix | (auto) | Full-screen combat VFX (heavy-hit / skill flashes) fill the whole screen instead of drawing 16:9 side bars at ultrawide. |
 | Graphical-corruption fix | (auto) | Rounds up internal render-scale values at odd widths (e.g. 3440) to stop corruption. |
+| Gameplay FOV multiplier | `[Gameplay FOV]` | `Multiplier` scales the rendered field of view (`>1` widens, `<1` zooms in). Applies to every 3D camera, **including cutscenes** — see limitations. |
+| Camera distance multiplier | `[Gameplay Camera Distance]` | `Multiplier` pulls the gameplay camera back (`>1`) or in (`<1`). Gameplay-only; cutscenes are unaffected by design — see limitations. |
 | Shadow quality | `[Shadow Quality]` | Override the shadow-map resolution (e.g. 4096/8192). |
 | Level of detail | `[Level of Detail]` | Multiplier to push out object LOD pop-in distance. **Medium confidence** — see below. |
 | Disable TAA | `[Disable TAA]` | Turns off temporal anti-aliasing. |
 | Raise FPS cap to 240 | `[Raise Framerate Cap]` | Experimental; physics can misbehave above 30 fps. |
-| Camera distance multiplier | `[Gameplay Camera Distance]` | Pull the gameplay camera back/in. |
 
 ### Known limitations on v2.0.2
 
-- **Gameplay FOV multiplier is NOT supported.** On v2.0.2 the gameplay camera message no
-  longer carries a FOV value — the slot that used to hold FOV now holds a pitch angle.
-  Hooking it would tilt the camera instead of zooming, so the FOV hook is intentionally
-  not installed. Any `[Gameplay FOV]` value (and the `<16:9` FOV compensation of
-  `[Fix FOV]`) is logged as *NOT SUPPORTED* and ignored. Aspect-ratio correction is
-  unaffected and still works at every resolution.
-- **LOD distance** and **UI markers** are **medium-confidence** relocations. They are
-  verified at the instruction level but benefit from in-game confirmation; if they
-  misbehave, fallback candidate sites are documented in `docs/PATTERNS.md`.
+- **Gameplay FOV multiplier affects cutscenes too.** The multiplier is applied inside the
+  projection-matrix builder, which serves *every* 3D camera — gameplay, cutscenes and menu
+  3D scenes alike. There is no clean "is this gameplay" discriminator at that site, so the
+  effect is global by design; leave `Multiplier = 1` (the default) if you don't want
+  cutscene framing changed. Values `<1.0` zoom in, `>1.0` widen the view.
+- **Large camera-distance multipliers can clip into walls.** Camera wall-collision is
+  computed *upstream* of where the distance multiplier is applied, so a `Multiplier > 1`
+  can push the camera eye into nearby geometry. This is a known property (v1's hook behaved
+  the same way), not a bug to be worked around by lowering the multiplier near walls.
+- **`<16:9` vertical-FOV compensation of `[Fix FOV]` is not ported.** Aspect-ratio
+  correction (`[Fix Aspect Ratio]`) works at every resolution; only the narrower-than-16:9
+  vertical-FOV widen is still unported and is logged accordingly. This does not affect
+  ultrawide (`>16:9`) displays.
+- **LOD distance** is a **medium-confidence** relocation. It is verified at the instruction
+  level but benefits from in-game confirmation; if it misbehaves, a fallback candidate site
+  is documented in `docs/PATTERNS.md`.
 
 ## Installing
 
 The game must be at version **v2.0.2** (see [Compatibility](#compatibility)).
 
-### Option A — installer (recommended)
+### 1. Download the release
 
-Run **`GBFRUltrawideSetup.exe`**. It:
+Go to the repository's **[Releases](https://github.com/zhen469891/gbfr-ultrawide/releases)**
+page and download the latest **`GBFRUltrawide-vX.Y.Z.zip`** asset, then extract it. The zip
+unpacks to a single `GBFRUltrawide-vX.Y.Z\` folder containing:
+
+- `GBFRUltrawideSetup.exe` — the installer;
+- `README.txt` — a short install note;
+- `payload\` — a copy of the mod laid out exactly like the game directory:
+  - `payload\winmm.dll` (the bundled Ultimate ASI Loader, x64)
+  - `payload\scripts\GBFRUltrawide.asi`
+  - `payload\scripts\GBFRUltrawide.ini`
+
+From there, pick **one** of the two install methods below.
+
+### 2a. Option A — installer (recommended)
+
+Run **`GBFRUltrawideSetup.exe`** from the extracted folder. It:
 
 - auto-detects the Steam install of Relink (reads Steam's `libraryfolders.vdf`, Steam
   App ID `881020`, plus common library locations), or lets you browse to it manually;
 - backs up any files it will overwrite into a `GBFRUltrawide_backup` folder, and offers
   to back up & remove leftover files from an old GBFRelinkFix install;
-- deploys `winmm.dll` (Ultimate ASI Loader) to the game root and `GBFRUltrawide.asi` +
-  `GBFRUltrawide.ini` into `scripts\`;
+- deploys the `payload\` tree verbatim — `winmm.dll` to the game root and
+  `GBFRUltrawide.asi` + `GBFRUltrawide.ini` into `scripts\`;
 - provides a graphical settings editor for the ini (resolution, HUD, tweaks).
 
-### Option B — manual install
+### 2b. Option B — manual install
 
-The release zip's **`payload\`** folder already mirrors the game-directory layout, so you can
+The extracted **`payload\`** folder already mirrors the game-directory layout, so you can
 just copy its contents in:
 
 1. Copy the **contents of `payload\`** into the game folder next to
@@ -89,10 +114,16 @@ identical to upstream GBFRelinkFix so an existing config carries over. Key optio
 
 - `[Custom Resolution] Enabled / Width / Height` — set your resolution, or leave
   `Width`/`Height` at `0` to inherit the desktop resolution.
+- `[Gameplay FOV] Multiplier` — scales the rendered field of view (`1.0` = original,
+  `>1` widens, `<1` zooms in). Applies to cutscenes as well.
+- `[Gameplay Camera Distance] Multiplier` — pulls the gameplay camera back (`>1`) or in
+  (`<1`); `1.0` = original. Gameplay-only (cutscenes unaffected).
 - `[Fix HUD] Enabled` — lock the HUD to 16:9 and span backgrounds.
 - `[Span HUD] Enabled / AspectRatio / SpanAllHUD / SpanAllBackgrounds` — `AspectRatio = 0`
   matches your screen; `1.7778` = 16:9, `2.3888` = 21:9, `3.5537` = 32:9.
 - `[Fix Aspect Ratio] Enabled` — 3D aspect correction.
+- `[Fix Nameplates] Enabled` — keep world-anchored nameplates aligned at `>16:9`.
+- `[Fix FOV] Enabled` — `<16:9` FOV compensation (see limitations; no effect at ultrawide).
 - `[Shadow Quality] Enabled / Value` — e.g. `2048`/`4096`/`8192`.
 - `[Level of Detail] Multiplier` — `>1` pushes out LOD pop-in.
 - `[Disable TAA] Enabled`, `[Raise Framerate Cap] Enabled` (240 fps, experimental).
