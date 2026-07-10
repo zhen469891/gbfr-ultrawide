@@ -15,6 +15,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # which compiles all of that out and ignores the section entirely.
 option(GBFR_DEV "Enable development/debug features ([Debug - Span HUD] ini section)" OFF)
 
+# Plugin version string, embedded into the binary (the "vX.Y.Z loaded." log line).
+# CI injects the release tag's version (cmake -DGBFR_VERSION=0.2.0); local builds
+# default to 0.0.0-dev, which identifies unofficial binaries in user logs.
+set(GBFR_VERSION "0.0.0-dev" CACHE STRING "Plugin version string embedded in the binary")
+
 # Static CRT
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -39,6 +44,7 @@ target_include_directories(GBFRUltrawide PRIVATE
 
 target_compile_definitions(GBFRUltrawide PRIVATE
     _CRT_SECURE_NO_WARNINGS
+    GBFR_VERSION_STRING="${GBFR_VERSION}"
 )
 
 if(GBFR_DEV)
