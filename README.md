@@ -35,6 +35,7 @@ the game updates again — see [`docs/PATTERNS.md`](docs/PATTERNS.md).
 | Nameplate fix | `[Fix Nameplates]` | Keeps world-anchored nameplates (floating name/speech labels) correctly positioned and scaled at `>16:9`. Only active when the screen is wider than 16:9. |
 | Combat-flash / VFX fix | (auto) | Full-screen combat VFX (heavy-hit / skill flashes) fill the whole screen instead of drawing 16:9 side bars at ultrawide. |
 | Graphical-corruption fix | (auto) | Rounds up internal render-scale values at odd widths (e.g. 3440) to stop corruption. |
+| Blur-backdrop fix | (auto) | Stops the pause/modal blur backdrop tiling into duplicate copies on wide displays that are 1080 tall (e.g. 3840×1080, 5120×1080). |
 | Gameplay FOV multiplier | `[Gameplay FOV]` | `Multiplier` scales the rendered field of view (`>1` widens, `<1` zooms in). Applies to every 3D camera, **including cutscenes** — see limitations. |
 | Camera distance multiplier | `[Gameplay Camera Distance]` | `Multiplier` pulls the gameplay camera back (`>1`) or in (`<1`). Gameplay-only; cutscenes are unaffected by design — see limitations. |
 | Shadow quality | `[Shadow Quality]` | Override the shadow-map resolution (e.g. 4096/8192). |

@@ -127,9 +127,9 @@ At RVA **0x06B84080 … 0x06B8409C** (each pair is W then H):
 | RVA | meaning |
 | --- | --- |
 | 0x06B84080 / 84 | fallback (default) render W/H |
-| 0x06B84088 / 8C | active render W/H |
-| 0x06B84090 / 94 | src render W/H |
-| 0x06B84098 / 9C | window_ref W/H (**also** the 1920/1080 that HUDConstraints reads) |
+| 0x06B84088 / 8C | **window W/H** (relabeled 2026-07-11: consumed as window dims by the ShadowBufferComponent temp-texture sizing fn 0x02479B90; previously listed as "active render") |
+| 0x06B84090 / 94 | render W/H (previously listed as "src render") |
+| 0x06B84098 / 9C | window W/H second copy, published from quality-table row +0x2C/+0x30 (**also** the 1920/1080 that HUDConstraints reads; the fhd/4K asset decisions §2.10 read 0x06B84098) |
 
 Other resolution globals: swapchain size @ 0x07193038 / 0x07193040, UI cached width @
 0x07021290. (These are read by the one-shot `DiagDump` in `dllmain.cpp`.)
@@ -297,6 +297,37 @@ v2.0.2 gameplay — see §3.24 correction).
   Verified 2026-07-11 (in-game FIRED, confidence HIGH) — see §3.26 and ADR-0013.
 - **Statics:** ctx0 = 0x07C25360, live eye = 0x07C25370 (ctx+0x10), live at = 0x07C25380
   (ctx+0x20) — the same statics §2.8 lists, now with their live WRITER identified.
+
+### 2.10 fhd/4K UI asset-set selection — five decision sites, all `windowW > 1920` (FHD_HUNT, 2026-07-11, issue #3)
+
+Relink ships two UI asset sets (`ui/fhd/...` FHD vs `ui/...` 4K — see Nenkai/relink-modding).
+The exe decides between them at **five** sites, and the axis is uniformly the **window WIDTH**
+global `[0x06B84098]` (published from quality-table row +0x2C by the two xchg publish sites
+§2.4 lists; no other writer among 274 classified rip references). Height is never consulted.
+
+| # | Role | Decision RVA | Compare | >1920 (4K) branch selects | imm32 @ / file offset |
+|---|------|-------------|---------|---------------------------|------------------------|
+| 1 | UI texture pack path (fn 0x0253B630) | 0x0253B77D | `cmp eax,0x780; jg` | `"ui/{0}.wtb"` @ 0x0621FD2C (else `"ui/fhd/{0}.wtb"` @ 0x0621FD37) | 0x0253B77E / 0x0253AB7E |
+| 2 | Movie directory (title bg video) | 0x0330C911 | `cmp eax,0x781; cmovl` | `"ui/movie"` (else `"ui/fhd/movie"`; (ptr,len) pairs @ 0x05CA0D38/48) | 0x0330C912 / 0x0330BD12 |
+| 3 | Copyright screen image | 0x0045C3FB | `cmp eax,0x781; jb` | `"system/copyright/copyright_4K.png"` (std::string @ 0x071BB9E0) | 0x0045C402 / 0x0045B802 |
+| 4 | UI texture scale factor → obj+0x2C | 0x00C3480C | `cmp eax,0x781; setnb` | 0.5f (else 1.0f; float pair @ 0x054A5298) — **must stay in lockstep with #1** | 0x00C3480D / 0x00C33C0D |
+| 5 | ≤1920-only special scaling path (`index==6`) | 0x0394E7E4 | `cmp eax,0x780; jg` | skips the special path | 0x0394E7EB / 0x0394DBEB |
+
+To force the 4K set unconditionally, patch each imm32: sites 1/5 `80 07 00 00 → 00 00 00 00`,
+sites 2/3/4 `81 07 00 00 → 01 00 00 00` (branch structure unchanged). Reverse direction
+(force FHD): imm32 → 0x7FFFFFFF.
+
+**Issue #3 status note:** at 3840×1080 windowW = 3840, so all five sites consistently pick
+the 4K set — statically the asset-set choice itself does NOT distinguish 3840×1080 from
+5120×1440. A **height-gated UI sampling bias** mismatch was the follow-up suspect (§3.27) —
+FHD-calibrated 0.25 whenever windowH ≤ 1080, so W>1920 ∧ H≤1080 mixes 4K assets with the
+FHD bias — but forcing the 4K bias was field-FALSIFIED as the issue #3 cause. A full
+height-axis sweep (all `cmp` forms vs 0x438/0x439, plus 0x2D0/0x5A0/0x870/0xF00) is in the
+2026-07-11 session scratchpad `height_sweep.txt`; other height sites are shadow temp-texture
+sizing (0x02479D53: H≥1080→1280×720 else 1024×576 — same branch for both 32:9 cases),
+derived-buffer sizing (0x023A55E8), default-window clamps (0x00847EDC/EF9), movie source-size
+followers (0x0330EF2B/F55D). Scanner tooling (FhdScan/XrefClass/AbsScan/FindFunc/Cmp81) lives
+in the same scratchpad; rebuildable from gbfr_analyze + csc.
 
 ---
 
@@ -499,7 +530,7 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Feature:** raise the fps cap to 240 (experimental; physics may misbehave >30 fps). The in-game **120** option becomes 240; 30/60 keep their meaning.
 - **Pattern:** `48 8D 05 ?? ?? ?? ?? C5 7B 10 14 C8` (`lea rax,[table]` + `vmovsd xmm10,[rax+rcx*8]`), unique @ RVA 0x001B6E63. Used only to LOCATE the table — **no hook is installed** (see below).
 - **Mechanism (REWORKED 2026-07-11, GitHub issue #4 / ADR-0014):** pure **data patch**. The lea's rip-relative displacement (`Memory::GetAbsolute64(hit+3)`) resolves the 3-entry double frame-time table `{1/30, 1/60, 1/120}` @ RVA 0x054D6BF0; the `1/120` entry is verified and rewritten to `1/240`.
-- **Why the v1-style mid-hook was removed:** full disasm of the main-loop function (RVA 0x001B5FE0..0x001BC3CB, `.pdata`-confirmed) showed the hook site +0xC (0x001B6E6F) is a **1-byte nop immediately followed by the spin-loop head at 0x001B6E70** — the loop's back-edge (`jmp` @ 0x001B6EC0) targets hookAddr+1, i.e. it jumps into the middle of safetyhook's 5-byte jmp. The hook was structurally unsafe on this build ever since the v1 port.
+- **Why the v1-style mid-hook was removed:** full disasm of the main-loop function (RVA 0x001B5FE0..0x001BC3CB, `.pdata`-confirmed) showed the hook site +0xC (0x001B6E6F) is a **1-byte nop immediately followed by the spin-loop head at 0x001B6E70** — the loop's back-edge (`jmp` @ 0x001B6EC0) targets hookAddr+1, i.e. it jumps into the middle of safetyhook's 5-byte jmp. The hook was structurally unsafe on this build ever since the v1 port; field report (issue #4) was "no effect".
 - **Why the data patch is sufficient:** exhaustive xref sweep (rip-relative disp32 over all exec sections + absolute-VA pointer scan over the whole file, 2026-07-11) found the lea at 0x001B6E63 is the table's **only** reader; xmm10 is never spilled and the table is re-read every frame. Index selection: `byte[[0x07C26B70]+0x3D]` (fps menu setting), 0→1/30, 1→1/60, ≥2→1/120. No branch bypasses the limiter (vsync just makes the first `vucomisd` pass immediately).
 - **Why 240 and not higher:** the engine's timestep computes `timeScale = clamp(avgFrameSec × 60.0, 0.25, 3.0)` (4-frame ring buffer @ 0x0703F440). `1/240` sits exactly on the 0.25 bound — beyond 240 fps, game logic runs faster than real time. 240 is the hard ceiling for a correct-speed game.
 - **Confidence:** HIGH — offline-verified end to end, and field-verified 2026-07-11 (local, 144 Hz: fps exceeds 120 with the data patch; the old v0.2.2 mid-hook build **crashes at launch** with the feature enabled, confirming the corrupted-back-edge analysis). Full 240 confirmation awaits a ≥240 Hz tester (issue #4).
@@ -641,6 +672,120 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 - **Dev-build DIAG-CAM2 (stream F):** in dev builds the **same single** `SafetyHookMid` on 0x00692497 also does the stream-F counting when `CamDiag` is set (splits `fires_ctx0` (rsi==0x07C25360) vs `fires_other`, computes ctx0 `|eye−at|` from the live xmm0/xmm1, min/max tracked). A **separate dev-only entry counter** on 0x00691F60 (`push rsi` function entry, `rcx`=ctx before the `[rcx+0xC0]` gate) counts `entries_ctx0`, so `gateskip = entries_ctx0 − fires_ctx0` measures gate closure. Report line: `DIAG-CAM2: camcommit fires_ctx0=N fires_other=N gateskip=N (entries_ctx0=N) |eye-at|=min..max`. (There is exactly ONE mid-hook on 0x00692497 — shipping multiply and dev counting share it.)
 - **ctx0 resolution:** `g_pCamCtx0 = baseModule + 0x07C25360` at install (the static main-view ctx from §2.8/§2.9); only compared against `rsi`/`rcx`, never dereferenced.
 - **Confidence:** **HIGH** (both patterns offline-verified unique on the deployed v2.0.2 exe, timestamp 1782470458; per-frame main-view liveness and the gameplay-only gate FIRED-verified in-game 2026-07-11). See ADR-0013.
+
+### 3.27 UIAtlasBias — issue #3 candidate, **FALSIFIED & REMOVED 2026-07-11** (kept as hunt record)
+
+- **Feature:** fixes the garbled/tiled title screen at "wide but ≤1080-tall" resolutions
+  (issue #3: 3840×1080; 2560×1080 predicted affected too) by keeping the game's UI sampling
+  bias consistent with its width-selected asset set (§2.10).
+- **Mechanism found (FHD_HUNT follow-up, 2026-07-11):** inside the giant canvas/display
+  function `[0x00154A10, 0x00162972)` (the same one hosting the §2.6 fill-width lerp /
+  CanvasFitHeight site), at **RVA 0x0015FB70**: `cmp r15d(windowH), 0x439; jl` — H ≤ 1080
+  stores **0.25f**, H ≥ 1081 stores **0.0f**, into `[[0x07BB5330]+0x48]` (a name-hash
+  registry object; dirty flag +0x4C, rebuild fn 0x02525CE0). Consumer: RVA 0x03BA0BF9 folds
+  `per-object[+0x30] + bias` into 4×float4 GPU constant records — a shader-side sampling
+  offset. This is the exe's **only** windowH-1080-thresholded behavior switch (full sweep in
+  `height_sweep.txt`, session scratchpad).
+- **Why it garbles:** asset set is chosen by **width** (>1920 → 4K, §2.10) but this bias by
+  **height**. All factory-reachable combos are consistent (1920×1080 = FHD set + 0.25;
+  ≥1440p-tall = 4K set + 0.0). `W>1920 ∧ H≤1080` (only reachable modded) = 4K atlas + the
+  FHD-calibrated 0.25 → atlas sampling lands off-grid → squeezed duplicate copies with black
+  gaps on the title screen. 5120×1440 gets 4K + 0.0 → clean, matching the field report.
+- **Patch (no hook):** pattern `41 81 FF 39 04 00 00 7C ??` (`cmp r15d,0x439; jl`), expected
+  unique @ 0x0015FB70 (`PatternScanAll` size==1 guard); `Memory::Write` imm32 at +0x3:
+  `0x439 → 1` (jl never takes → bias stays 0.0). Applied only when
+  `iCustomResX > 1920 && iCustomResY <= 1080`, so all factory setups keep factory behavior.
+  Reverse experiment (force 0.25): `7C 06 → EB 06` at +0x7.
+- **VERDICT (2026-07-11, local repro at 3840×1080): FALSIFIED.** With the patch applied
+  before the resolution flip (an ordering subtlety: the bias store only re-runs on a
+  resolution change, so the first attempt in `GraphicalFixes` landed a second too late and
+  was inconclusive), a `DiagDump` readback confirmed `bias = 0` live at title time — and
+  the tiling was unchanged. The bias and its width/height axis mismatch are real but are
+  NOT the cause of issue #3. Patch removed; section kept so the hypothesis is not
+  re-hunted. Root cause was instead found to be the downsampled blur buffer (§3.28).
+
+### 3.28 GaussBufferSize — issue #3 candidate, **FALSIFIED & REMOVED 2026-07-11** (kept as hunt record)
+
+- **FIELD VERDICT (2026-07-11, local repro at 3840×1080):** the renderH-compare patch below
+  DID resize the buffer (log `DIAG: gauss_buffer=1920x1080`, identical to what the working
+  5120×1440 gets) but the tiling behind modals was **unchanged**. Buffer SIZE is therefore
+  NOT the cause — 3840×1080 and 5120×1440 now share the same 1920×1080 buffer yet only the
+  former tiles. The mis-scale lives in the **downstream fullscreen pass that samples this
+  buffer back across the backbuffer** (UV/scale/window rect, dependent on backbuffer dims),
+  which is GPU-side. Patch removed (no benefit, alters factory behavior). The mechanism facts
+  below stay as anchors; the residual lever is the sampling-side UV (see hunt notes / §2.10).
+- **Feature (candidate, removed):** targeted the pause/modal **blur backdrop tiling** at wide-but-≤1080-tall
+  resolutions (issue #3: 3840×1080; 2560×1080 also affected). Symptom: with a modal dialog
+  or submenu open, the screen behind it becomes several horizontally-squeezed duplicate
+  copies with black vertical gaps; closing the modal restores it. The title screen itself
+  is fine — it is the *backdrop* (blurred snapshot behind a modal), not any UI widget
+  (field-isolated: independent of Span HUD, Fix HUD, SpanAllBackgrounds, and confirmed by
+  probe as not a whitelisted background element).
+- **Mechanism (offline-verified):** the Cygames "cyan" renderer sizes a shared downsampled
+  post-process buffer (`GaussScaledTarget` / `GaussTemporaryTarget`, the same RT family the
+  pause/modal blur uses — `ControlPauseBg` / `SetIsOpenPauseMenu` / `bgGauss_`) by a two-way
+  branch on the **src render resolution** @ **RVA 0x023A55E0**:
+  `both(renderW≥1921 && renderH≥1081) ? 1920×1080 : 960×540`, reading src_render W/H
+  (0x06B84090 / 0x06B84094), storing to 0x06B84078 (H) / 0x06B8407C (W); the single consumer
+  @ RVA 0x001EB1C8 allocates the RT at exactly that size (RT-manager singleton 0x07192F48).
+  At 3840×1080 the `renderH≥1081` test fails (1080 < 1081) → 960×540 buffer; a downstream
+  fullscreen pass samples that 16:9 buffer across the 32:9 backbuffer → wrap/tiling. 5120×1440
+  and 3440×1440 pass the test → full 1920×1080 buffer → clean. The `renderW≥1921` test already
+  excludes native 16:9 1080p, so only wide (>1920) ≤1080-tall setups (this mod's territory)
+  are affected.
+- **Patch (no hook):** pattern `3D 81 07 00 00 0F 93 C0 81 F9 39 04 00 00 0F 93 C1 84 C8`
+  (`cmp eax,0x781; setnb al; cmp ecx,0x439; setnb cl; test al,cl`), offline-verified unique
+  @ 0x023A55E0; `Memory::Write` imm32 at **+10** (the imm32 of `cmp ecx,0x439` sits right
+  after the 2-byte opcode+ModRM `81 F9`; +11 clips the next instruction and crashes): `0x439 → 1` so the renderH test always
+  passes and the buffer stays 1920×1080. Pure imm rewrite (same length, no hook, no branch
+  retarget). The size is recomputed per frame, so the patched compare takes effect every
+  subsequent frame regardless of injection timing. Gated to `iCustomResX > 1920 &&
+  iCustomResY <= 1080`, leaving every factory-reachable setup untouched. `DiagDump` logs
+  `src_render` and `gauss_buffer` for confirmation.
+- **Confidence:** mechanism (branch, globals, consumer, RT identity) **HIGH** (offline);
+  the "buffer size causes the tiling" causal claim **FALSIFIED** in the field (see verdict
+  above). This is the §4 rule-8/9 lesson again: a HIT and a confirmed data change (the buffer
+  really did become 1920×1080) still proved nothing about the visible symptom until eyes-on.
+  The real fix turned out to be §3.29.
+
+### 3.29 GaussBackdropTiling (`GraphicalFixes`, NEW 2026-07-11 — issue #3 fix)
+
+- **Feature:** fixes the pause/modal **blur backdrop tiling** at renderH == 1080 (3840×1080,
+  5120×1080, 2560×1080, …). Symptom & isolation: see §3.28. Field-confirmed trigger table:
+  3840×1080 broken, 5120×1080 broken, 5120×1440 fine, 3440×1440 fine → the trigger is purely
+  **renderH == 1080**, independent of width/aspect.
+- **Mechanism (offline-verified):** the backdrop's downsampled source (Cygames "cyan"
+  `GaussScaledTarget`) is a **hardcoded 1920×1080** RT (RVA 0x007CE785 stores 0x780, 0x007CE791
+  stores 0x438). It is drawn back to the backbuffer by replaying a projection matrix built each
+  frame by the viewport reader **@ RVA 0x0330EF00** (called from 0x030E3E3E), which branches on
+  render height @ **RVA 0x0330EF2B**: `cmp dword[rcx+0x284],0x438 ; jnz 0x0330EF66`:
+  - **renderH == 1080** (fall-through) → builds the projection from the ACTUAL (wide) width
+    `[rsi+0x280]` while the source stays 1920-wide → horizontal factor 3840/1920 = 2.0 → the
+    blit wraps → two squeezed copies + black gaps. renderH is the only input, so every
+    1080-tall width tiles.
+  - **renderH != 1080** (jnz taken → 0x0330EF66) → normalizes to a canonical 1920×1080 basis;
+    this is the path 5120×1440 / 3440×1440 already take, hence they are clean.
+- **The draw-path flag +0x28A is a RED HERRING** (the failed first attempt): a sibling
+  *producer* @ RVA 0x0330F55C does `cmp r8d,0x438 ; setnz byte[rcx+0x28A]`, and the consumer
+  @ RVA 0x03956ECC branches on that flag. Patching the producer's `0x438→0` (imm at +3) had
+  no field effect because its `setnz` sits behind a **resolution-CHANGE early-out** (`cmp
+  [rcx+0x284],r8d ; jz` @ 0x0330F53F) — on a stable 1080-tall session it never executes, so
+  the flag keeps its default. The per-frame authority that actually bakes the wrong geometry
+  is the reader 0x0330EF00, not the flag. (Also a prior dead-end: §3.28 buffer resize.)
+- **Patch (no hook):** pattern `81 B9 84 02 00 00 38 04 00 00` (`cmp dword[rcx+0x284],0x438`),
+  offline-verified unique @ 0x0330EF2B; `Memory::Write` imm32 at **+6** (after the 2-byte
+  opcode+ModRM `81 B9` and the 4-byte disp32 `0x284`): `0x438 → 0`, so renderH (never 0)
+  always takes the jnz/normalize arm. Verify the imm reads 0x438 first (the §3.28 off-by-one
+  crash is the cautionary tale — count opcode+ModRM+disp before the imm). This reader runs
+  every frame, so unlike the producer it is not gated by a resolution-change check. Gated to
+  `iCustomResX > 1920 && iCustomResY <= 1080`, so native 16:9 1080p (correct as-is) is untouched.
+  **Fallback** if this regresses: flip the `jnz` (75)→`jmp` (EB) at 0x0330EF35 (equivalent),
+  or inspect the matrix write at +0xB0 (0x0330F018 / the 0x0330EF98→0x760F70 call).
+- **Confidence:** **HIGH** — offline mechanism (reader is the per-frame projection authority,
+  branch decoded, trigger table matches renderH==1080 exactly, explains why both the §3.28
+  resize and the producer-flag patch failed) **and field-verified 2026-07-11** at 3840×1080:
+  the tiling behind modals is gone with this patch (after §3.28 and the producer-flag patch
+  had both changed bytes yet left the symptom — the §4 rule-8/9 lesson, twice, before this).
 
 ---
 

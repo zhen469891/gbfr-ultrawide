@@ -18,6 +18,12 @@
 //                                                (diagnostic: runtime showed hooks install but 21:9 not applied,
 //                                                so we no longer assume the first copy is the live path)
 //   [OK]    ScreenEffects   (GraphicalFixes)   - verified; hook at +0xB
+//   [NEW 2026-07-11] GaussBackdropTiling (GraphicalFixes) - issue #3: imm patch (renderH cmp 0x438 -> 0 @ RVA
+//                                                0x0330EF2B, the per-frame viewport reader) forcing the pause/modal
+//                                                blur backdrop's projection down the canonical-1920x1080 path that
+//                                                the working wide resolutions use, instead of the renderH==1080
+//                                                arm that stretches the 1920-wide GaussScaledTarget across a wider
+//                                                backbuffer; gated iCustomResX>1920 && iCustomResY<=1080 (PATTERNS.md 3.29)
 //   [FIXED] UIBackgrounds   (HUDFix)           - base at +0x2F; >16:9 hook (base+0x0) now writes xmm1 (v2 loads width
 //                                                into xmm1; xmm0 is overwritten right after), <16:9 hook moved
 //                                                base+0x28 -> base+0x29 (v1 offset landed inside an 8-byte vmovss);
@@ -932,6 +938,48 @@ void GraphicalFixes()
                             ctx.xmm3.f32[0] = ceilf(ctx.xmm3.f32[0]);
                         }));
                 }
+            }
+        }
+
+        // [NEW 2026-07-11, GitHub issue #3 - the fix] Pause/modal blur backdrop tiling at
+        // renderH==1080. The backdrop replays a projection matrix built each frame by the
+        // viewport reader @ RVA 0x0330EF00 (called from 0x030E3E3E). That reader branches on
+        // render height @ RVA 0x0330EF2B: "cmp [rcx+0x284],0x438 ; jnz 0x0330EF66":
+        //   renderH == 1080 (fall-through) -> builds the projection from the ACTUAL (wide)
+        //       width [rsi+0x280] while the backdrop's source (GaussScaledTarget) stays
+        //       1920-wide -> the 3840/1920 = 2.0 horizontal mismatch -> two squeezed copies
+        //       + black gaps. Purely renderH-gated, so 3840x1080 AND 5120x1080 tile.
+        //   renderH != 1080 (jnz taken, 0x0330EF66) -> normalizes to a canonical 1920x1080
+        //       basis - the correct path 5120x1440 / 3440x1440 already use, hence they are clean.
+        // Fix: patch the compare imm 0x438 -> 0 so renderH (never 0) always takes the jnz /
+        // normalize arm, routing 3840x1080 down the exact path the working resolutions use.
+        // This reader runs EVERY frame (unlike the sibling producer @ 0x0330F55C, whose
+        // setnz is gated behind a resolution-CHANGE early-out and so never ran on a stable
+        // 1080-tall session - that was the earlier failed attempt, PATTERNS.md 3.28/3.29).
+        // Pure imm32 rewrite (same length, no hook). Gated to iCustomResX>1920 &&
+        // iCustomResY<=1080 so native 16:9 1080p (correct as-is) is untouched. PATTERNS.md 3.29.
+        if (iCustomResX > 1920 && iCustomResY <= 1080)
+        {
+            // cmp dword[rcx+0x284],0x438 ; jnz - unique @ RVA 0x0330EF2B. imm32 at +6
+            // (after the 2-byte opcode+ModRM 81 B9 and the 4-byte disp32 0x284).
+            uint8_t* GaussBackdropScanResult = Memory::PatternScan(baseModule, "81 B9 84 02 00 00 38 04 00 00");
+            if (GaussBackdropScanResult)
+            {
+                int32_t* pRenderHCmpImm = reinterpret_cast<int32_t*>(GaussBackdropScanResult + 6);
+                if (*pRenderHCmpImm == 0x438)
+                {
+                    LogInfo("HIT: GaussBackdropTiling: %s+0x%llx - patching the renderH==1080 projection branch so the pause/modal blur backdrop uses the canonical-1920x1080 path (the wide resolutions' path) at %dx%d",
+                        sExeName.c_str(), ModOffset(GaussBackdropScanResult), iCustomResX, iCustomResY);
+                    Memory::Write((uintptr_t)pRenderHCmpImm, (int32_t)0); // cmp [rcx+0x284],0x438 -> ...,0: renderH != 0 always -> jnz normalize arm
+                }
+                else
+                {
+                    LogError("MISS: GaussBackdropTiling: imm at +6 is 0x%X, not 0x438 - offset/pattern drift, patch skipped", *pRenderHCmpImm);
+                }
+            }
+            else
+            {
+                LogError("MISS: GaussBackdropTiling pattern not found - pause/modal blur backdrop may tile at renderH==1080 (issue #3)");
             }
         }
 
@@ -2470,6 +2518,11 @@ static void DiagDump()
         rd(0x06B84210 + 5 * 0x4C + 0x24), rd(0x06B84210 + 5 * 0x4C + 0x28),
         rd(0x06B84210 + 5 * 0x4C + 0x2C), rd(0x06B84210 + 5 * 0x4C + 0x30));
     LogInfo("DIAG: swapchain=%ux%u | uiCachedW=%u", rd(0x07193038), rd(0x07193040), rd(0x07021290));
+    // [issue #3] src_render + the derived downsampled-blur buffer (GaussScaledTarget family,
+    // shared by the pause/modal backdrop). Buffer size was ruled out as the tiling cause
+    // (1920x1080 tiles just like 960x540 did); kept as a general resolution-path diagnostic.
+    LogInfo("DIAG: src_render=%ux%u | gauss_buffer=%ux%u",
+        rd(0x06B84090), rd(0x06B84094), rd(0x06B8407C), rd(0x06B84078));
 }
 
 #ifdef GBFR_DEVBUILD
