@@ -23,6 +23,20 @@ future game update makes it obvious *which* single feature broke.
 For the full engineering story — how each pattern was relocated and how to redo it when
 the game updates again — see [`docs/PATTERNS.md`](docs/PATTERNS.md).
 
+## Maintenance status & alternatives
+
+> [!IMPORTANT]
+> This mod is maintained on a **best-effort basis, and realistically only while I'm still
+> actively playing the game.** Each Relink update tends to break the memory patterns (see
+> [Compatibility](#compatibility)), and I can't promise I'll always be around to keep it
+> current. If it's broken on a newer game version and I haven't updated it, that's why.
+
+If you need an alternative, other ultrawide fixes for Relink are:
+
+- **[Lyall/GBFRelinkFix (Codeberg)](https://codeberg.org/Lyall/GBFRelinkFix)** — the original author's own repository. Lyall appears to intend a v2 update (a `ragnarok` branch exists), but as of 2026-07-11 13:10 UTC no new release has been published there yet.
+- **[alexfrljuckic/GBFRelinkMod](https://github.com/alexfrljuckic/GBFRelinkMod)** — open source.
+- **[RetroGawd/granblue-fantasy-relink-ragnarok-ultrawide](https://github.com/RetroGawd/granblue-fantasy-relink-ragnarok-ultrawide)** — closed source; the author provides a YouTube video guide and a Discord server for support.
+
 ## Features
 
 | Feature | ini section | Notes |
