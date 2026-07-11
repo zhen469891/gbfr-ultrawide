@@ -132,10 +132,14 @@
 //                                                hook +0x0 -> +0x8 (after the 8-byte vdivss), xmm1 -> xmm2.
 //                                                Confidence: MEDIUM - needs in-game verification; fallback
 //                                                candidate RVA 0x0322ADDE (see hunt_lod_fpscap.txt)
-//   [REFOUND v2.0.2] FPSCap      (FPSCap)          - v2 limiter loads frame time (double) from 3-entry table
+//   [REWORKED 2026-07-11] FPSCap (FPSCap)         - v2 limiter loads frame time (double) from 3-entry table
 //                                                (1/30, 1/60, 1/120 @ RVA 0x054D6BF0) into xmm10 then spins on
-//                                                vucomisd+pause. New pattern @ RVA 0x001B6E63; hook +0x5 -> +0xC
-//                                                (must be after the vmovsd), xmm6 -> xmm10
+//                                                vucomisd+pause. Pattern @ RVA 0x001B6E63. NO HOOK anymore: the
+//                                                v1-style mid-hook at +0xC overlapped the spin-loop head at
+//                                                +0xD (back-edge jumps into the patch bytes) - replaced by a
+//                                                data patch of the table's 1/120 entry -> 1/240 (unique reader,
+//                                                re-read every frame). 240 is the engine ceiling (timestep
+//                                                scale clamps at 0.25 = 60/240). Issue #4 / ADR-0014.
 //
 // MISS on v2.0.2: none - all v1 patterns relocated or replaced (GameplayCamera deleted as a dead
 // site), plus the v2-native patterns ViewParamsFOV, ProjMatrixFOV, Nameplate, CamDistPreset,
@@ -2413,15 +2417,37 @@ void FPSCap()
         uint8_t* FPSCapScanResult = Memory::PatternScan(baseModule, "48 8D 05 ?? ?? ?? ?? C5 7B 10 14 C8");
         if (FPSCapScanResult)
         {
-            LogInfo("HIT: FPSCap: %s+0x%llx (hook at +0xC)", sExeName.c_str(), ModOffset(FPSCapScanResult));
+            LogInfo("HIT: FPSCap: %s+0x%llx (data patch, no hook)", sExeName.c_str(), ModOffset(FPSCapScanResult));
 
-            static SafetyHookMid FPSCapMidHook{};
-            FPSCapMidHook = safetyhook::create_mid(FPSCapScanResult + 0xC,
-                [](SafetyHookContext& ctx)
-                {
-                    // Menus seem to speed up beyond 240fps.
-                    ctx.xmm10.f64[0] = (double)1 / 240;
-                });
+            // [REWORKED 2026-07-11, GitHub issue #4 / ADR-0014] The v1-inherited mid-hook at
+            // +0xC is REMOVED: offline disasm of the whole main-loop function showed the
+            // limiter's spin-loop head (0x001B6E70) is the very next byte after the hook
+            // site (a 1-byte nop @ +0xC) - safetyhook's 5-byte jmp overlaps it, so the
+            // loop's back-edge (jmp @ 0x001B6EC0) lands INSIDE our patch bytes. The hook
+            // was never safe; any behavior from "no effect" to corruption was possible.
+            //
+            // The correct mechanism is a pure data patch: the 3-entry frame-time table this
+            // lea points to is the exe's ONLY reader site (full rip-relative + absolute-VA
+            // xref sweep, 2026-07-11), xmm10 is never spilled, and the table is re-read
+            // every frame - so rewriting the 1/120 entry to 1/240 fully raises the cap with
+            // zero code-patch risk. Only the in-game "120" setting becomes 240; 30/60 keep
+            // their meaning. Do NOT raise beyond 240: the engine clamps its timestep scale
+            // to [0.25, 3.0] relative to 60Hz, and 1/240 sits exactly on the 0.25 bound -
+            // any faster and game logic runs faster than real time.
+            double* pFrameTimeTable = reinterpret_cast<double*>(Memory::GetAbsolute64((uintptr_t)FPSCapScanResult + 3));
+            LogInfo("FPS Cap: frame-time table at %s+0x%llx = {1/%.0f, 1/%.0f, 1/%.0f}",
+                sExeName.c_str(), ModOffset((uint8_t*)pFrameTimeTable),
+                1.0 / pFrameTimeTable[0], 1.0 / pFrameTimeTable[1], 1.0 / pFrameTimeTable[2]);
+            if (fabs(pFrameTimeTable[2] - (1.0 / 120.0)) < 1e-9)
+            {
+                Memory::Write((uintptr_t)&pFrameTimeTable[2], 1.0 / 240.0);
+                LogInfo("FPS Cap: table entry #2 patched 1/120 -> 1/%.0f (select the 120 fps option in-game to get 240)",
+                    1.0 / pFrameTimeTable[2]);
+            }
+            else
+            {
+                LogWarn("FPS Cap: table entry #2 is not 1/120 (game update?) - patch skipped, cap unchanged");
+            }
         }
         else
         {

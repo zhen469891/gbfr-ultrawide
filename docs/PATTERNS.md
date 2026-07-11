@@ -496,13 +496,13 @@ The boot-time "apply saved settings" path does **not** go through the preset tab
 
 ### 3.16 FPSCap (`FPSCap`)
 
-- **Feature:** raise the 240 fps cap (experimental; physics may misbehave >30 fps).
-- **Pattern:** `48 8D 05 ?? ?? ?? ?? C5 7B 10 14 C8` (`lea rax,[table]` + `vmovsd xmm10,[rax+rcx*8]`).
-- **Hits / RVA:** unique @ RVA 0x001B6E63; hook **+0xC** (after the 7-byte lea + 5-byte vmovsd).
-- **Hook semantics:** `ctx.xmm10.f64[0] = (double)1/240` — the value is a **double** frame-time. Must be after the vmovsd, or the original load overwrites ours. (v1 used xmm6 at +0x5.)
-- **v1→v2:** the limiter was rewritten — it now reads the target frame time from a 3-entry double table into xmm10 and busy-waits on `vucomisd + pause`.
-- **Hunt method:** anchored on the 3-entry double frame-time table **@ RVA 0x054D6BF0** = `{1/30, 1/60, 1/120}` (indexed by the fps menu setting; the index comes from `[0x07C26B70]` + `byte[rax+0x3D]`) — the most reliable anchor; `disasm` located the load + the `vucomisd`/`pause` busy-wait spin. A minimal alternative pattern is `C5 7B 10 14 C8` (hook +0x5).
-- **Confidence:** HIGH.
+- **Feature:** raise the fps cap to 240 (experimental; physics may misbehave >30 fps). The in-game **120** option becomes 240; 30/60 keep their meaning.
+- **Pattern:** `48 8D 05 ?? ?? ?? ?? C5 7B 10 14 C8` (`lea rax,[table]` + `vmovsd xmm10,[rax+rcx*8]`), unique @ RVA 0x001B6E63. Used only to LOCATE the table — **no hook is installed** (see below).
+- **Mechanism (REWORKED 2026-07-11, GitHub issue #4 / ADR-0014):** pure **data patch**. The lea's rip-relative displacement (`Memory::GetAbsolute64(hit+3)`) resolves the 3-entry double frame-time table `{1/30, 1/60, 1/120}` @ RVA 0x054D6BF0; the `1/120` entry is verified and rewritten to `1/240`.
+- **Why the v1-style mid-hook was removed:** full disasm of the main-loop function (RVA 0x001B5FE0..0x001BC3CB, `.pdata`-confirmed) showed the hook site +0xC (0x001B6E6F) is a **1-byte nop immediately followed by the spin-loop head at 0x001B6E70** — the loop's back-edge (`jmp` @ 0x001B6EC0) targets hookAddr+1, i.e. it jumps into the middle of safetyhook's 5-byte jmp. The hook was structurally unsafe on this build ever since the v1 port.
+- **Why the data patch is sufficient:** exhaustive xref sweep (rip-relative disp32 over all exec sections + absolute-VA pointer scan over the whole file, 2026-07-11) found the lea at 0x001B6E63 is the table's **only** reader; xmm10 is never spilled and the table is re-read every frame. Index selection: `byte[[0x07C26B70]+0x3D]` (fps menu setting), 0→1/30, 1→1/60, ≥2→1/120. No branch bypasses the limiter (vsync just makes the first `vucomisd` pass immediately).
+- **Why 240 and not higher:** the engine's timestep computes `timeScale = clamp(avgFrameSec × 60.0, 0.25, 3.0)` (4-frame ring buffer @ 0x0703F440). `1/240` sits exactly on the 0.25 bound — beyond 240 fps, game logic runs faster than real time. 240 is the hard ceiling for a correct-speed game.
+- **Confidence:** HIGH — offline-verified end to end, and field-verified 2026-07-11 (local, 144 Hz: fps exceeds 120 with the data patch; the old v0.2.2 mid-hook build **crashes at launch** with the feature enabled, confirming the corrupted-back-edge analysis). Full 240 confirmation awaits a ≥240 Hz tester (issue #4).
 
 ### 3.17 ViewParamsFOV (`AspectFOVFix`, NEW 2026-07-10; ROLE CHANGE 2026-07-10)
 

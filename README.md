@@ -40,7 +40,7 @@ the game updates again — see [`docs/PATTERNS.md`](docs/PATTERNS.md).
 | Shadow quality | `[Shadow Quality]` | Override the shadow-map resolution (e.g. 4096/8192). |
 | Level of detail | `[Level of Detail]` | Multiplier to push out object LOD pop-in distance. **Medium confidence** — see below. |
 | Disable TAA | `[Disable TAA]` | Turns off temporal anti-aliasing. |
-| Raise FPS cap to 240 | `[Raise Framerate Cap]` | Experimental; physics can misbehave above 30 fps. |
+| Raise FPS cap to 240 | `[Raise Framerate Cap]` | Turns the in-game "120" option into 240. Experimental; physics can misbehave above 30 fps. |
 
 ### Known limitations on v2.0.2
 
@@ -126,7 +126,7 @@ identical to upstream GBFRelinkFix so an existing config carries over. Key optio
 - `[Fix FOV] Enabled` — `<16:9` FOV compensation (see limitations; no effect at ultrawide).
 - `[Shadow Quality] Enabled / Value` — e.g. `2048`/`4096`/`8192`.
 - `[Level of Detail] Multiplier` — `>1` pushes out LOD pop-in.
-- `[Disable TAA] Enabled`, `[Raise Framerate Cap] Enabled` (240 fps, experimental).
+- `[Disable TAA] Enabled`, `[Raise Framerate Cap] Enabled` (the in-game "120" option becomes 240 fps; experimental).
 - `[GBFRelinkFix Parameters] InjectionDelay` — ms to wait before applying non-resolution
   hooks (default `1000`).
 
