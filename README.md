@@ -34,7 +34,6 @@ the game updates again — see [`docs/PATTERNS.md`](docs/PATTERNS.md).
 If you need an alternative, other ultrawide fixes for Relink are:
 
 - **[Lyall/GBFRelinkFix (Codeberg)](https://codeberg.org/Lyall/GBFRelinkFix)** — the original author's own repository. Lyall appears to intend a v2 update (a `ragnarok` branch exists), but as of 2026-07-11 13:10 UTC no new release has been published there yet.
-- **[alexfrljuckic/GBFRelinkMod](https://github.com/alexfrljuckic/GBFRelinkMod)** — open source.
 - **[RetroGawd/granblue-fantasy-relink-ragnarok-ultrawide](https://github.com/RetroGawd/granblue-fantasy-relink-ragnarok-ultrawide)** — closed source; the author provides a YouTube video guide and a Discord server for support.
 
 ## Features
