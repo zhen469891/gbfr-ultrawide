@@ -331,6 +331,45 @@ in the same scratchpad; rebuildable from gbfr_analyze + csc.
 
 ---
 
+### 2.11 UI element ids are `XXHash32Custom(name)` — data-layer identification via GBFRDataTools
+
+The runtime UI element id (struct **+0x1C4**, §2.1) is the **XXHash32-custom of the element's
+authored name**. This turns "which element is id N?" from a live-probe grind into a data
+lookup, and it survives game updates (names are stable), unlike the exe hook patterns.
+
+- **Tool:** [Nenkai/GBFRDataTools](https://github.com/Nenkai/GBFRDataTools) (needs **.NET 10
+  runtime**). Relevant commands: `extract -i <data.i> -o <dir> -f <path>`, `b-convert -i x.prfb
+  -o x.yaml`, `hash-string -i <name>` (prints the id as hex — the authoritative oracle). The
+  bundled `filelist.txt` (~400k paths) is greppable for the file that hosts an element.
+- **Workflow to name an id:** grep `filelist.txt` for the likely `ui/layouts/...` file →
+  `extract` its `.prfb` → read printable ASCII runs (element/locator names are stored verbatim:
+  `root`, `root01`, `loc_*`, `guide_sub_*`, …) → `hash-string -i <name>` each → match id.
+  **Caveat:** `.prfb` b-convert **fails** on files with custom `Controller*` components
+  (`ControllerGuideCommand`, `ControllerTutorialCursor`, …) — so use the raw-strings path, not
+  YAML. `.view.viewb` files *do* convert but carry only layout transforms + child `AssetPath`s
+  (no name fields).
+- **Hash algorithm** (to reproduce offline without the tool; from
+  `GBFRDataTools.Hashing/XXHash32Custom.cs`): stock XXHash32 with init `h32=0x178A54A4`, lane
+  seeds `0x2557311B/0x871FB76A/0x0133ECF3/0x62FC7342`, **ASCII** bytes, **no lowercasing**,
+  block-loop bound `> 16` (not `>= 16`). KATs: `""` → `0x887AE0B0`, `root` → `0xFE1DAE6D`
+  (= 4263358061, the menu-root parent seen dominating the Span-HUD probe logs — the validation
+  vector). Note: FSM/generic *node* names use a different hash (CRC32 of the lowercased string,
+  per `generic_node_names.txt`); this XXHash32-custom form is the one for UI element ids.
+- **Named anchors (this mod's own adjusted elements, confirmed 2026-07-17):** combat-prompt host
+  `2939675107` = `root01`; prompts `717607238` = `guide_sub_r_02`, `2156071331` = `guide_sub_l_02`,
+  `3412483092` = `guide_sub_l_01` — all in `ui/layouts/hud/guide_sub01.prfb`; the gameplay HUD
+  tree is assembled by `ui/layouts/hud/hud01.view.viewb`. The Span-HUD blocklist / childblock
+  ids resolve to **generic story/menu container** names (confirming the §3.12 comment):
+  `1579537302`=`loc_bg01`, `584127281`=`loc_chr01`, `2229826448`=`loc_list01`,
+  `368881640`=`loc_title01`, `2464430819`=`loc_base01`, `3646400251`=`loc_guide02`,
+  `178979338`=`loc_text01`. Because these are generic, one id recurs across many prefabs.
+- **Scope:** GBFRDataTools is a *data-layer* aid (identification, reading authored layout, and
+  update-resilient re-finding), adopted per **ADR-0016**, and complementary to — not a
+  replacement for — the runtime ASI hooks. It does **not** unlock the issue #7 tutorial-highlight
+  fix (that box is a separate custom-component subsystem; see **ADR-0017**).
+
+---
+
 ## 3. Per-pattern reference (v1 lineage + v2 additions)
 
 Confidence legend: **HIGH** = unique hit + verified semantics; **MEDIUM-HIGH** = unique +
