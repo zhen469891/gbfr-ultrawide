@@ -74,6 +74,16 @@ If you need an alternative, other ultrawide fixes for Relink are:
 - **LOD distance** is a **medium-confidence** relocation. It is verified at the instruction
   level but benefits from in-game confirmation; if it misbehaves, a fallback candidate site
   is documented in `docs/PATTERNS.md`.
+- **Tutorial highlight boxes don't follow the HUD.** During tutorials the game highlights a
+  HUD element with a box/border. These appear to work differently from the regular HUD
+  elements — they're placed at the element's original 16:9 position and don't go through the
+  layout the mod adjusts, so at ultrawide they stay put while the HUD moves out to the edges.
+  Cosmetic and tutorial-only, so left unfixed for now (issue #7).
+- **Some 16:9-authored overlays show the 3D scene at their sides instead of black bars.** A few
+  full-screen sequences (e.g. primal-burst cinematics) and the in-game system-menu background
+  are authored for 16:9; at ultrawide their sides are transparent and reveal the live 3D scene
+  rather than being pillarboxed. Adding black bars there is out of scope for now, so they're
+  left as-is (issue #6).
 
 ## Installing
 
@@ -152,6 +162,11 @@ very likely break some or all patterns** — exactly as v2.0 broke the original 
 that happens, the log flips the affected features to `MISS` and disables *only* those
 features; the rest keep working. Re-hunting instructions are in
 [`docs/PATTERNS.md`](docs/PATTERNS.md).
+
+For the data/UI side — identifying element ids, reading authored UI layout, and re-finding
+elements after an update — the project uses
+[Nenkai/GBFRDataTools](https://github.com/Nenkai/GBFRDataTools) (a UI element's runtime id is
+`XXHash32Custom(name)`; see [`docs/PATTERNS.md`](docs/PATTERNS.md) §2.11 and `docs/adr/0016`).
 
 ## Building from source
 
