@@ -99,7 +99,7 @@ jobs:
 
           # Short readme covering both install paths
           $readme = @"
-          GBFRUltrawide $tag - ultrawide (21:9 / 32:9) fix for Granblue Fantasy Relink v2.0.2
+          GBFRUltrawide $tag - ultrawide (21:9 / 32:9) fix for Granblue Fantasy Relink v2.0.3
 
           RECOMMENDED - use the installer:
             Run GBFRUltrawideSetup.exe. It auto-detects the game, backs up any existing

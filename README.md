@@ -1,18 +1,19 @@
 # GBFRUltrawide
 
-> Custom-resolution & ultrawide (21:9 / 32:9) fix for **Granblue Fantasy: Relink v2.0.2** — a v2.0.2 rebuild of Lyall's GBFRelinkFix.
+> Custom-resolution & ultrawide (21:9 / 32:9) fix for **Granblue Fantasy: Relink v2.0.3** — a v2.0.3 rebuild of Lyall's GBFRelinkFix.
 
-Ultrawide / non-16:9 fix for **Granblue Fantasy: Relink v2.0.2**, shipped as an x64 ASI
+Ultrawide / non-16:9 fix for **Granblue Fantasy: Relink v2.0.3**, shipped as an x64 ASI
 plugin. It restores custom resolutions, correct aspect ratio, and a proper HUD on
 21:9 / 32:9 (and narrower) displays.
 
 ## What this is (and why it exists)
 
-This project is a **v2.0.2 rewrite** of [Lyall's GBFRelinkFix](https://github.com/Lyall/GBFRelinkFix)
+This project is a **v2.0.3 rewrite** of [Lyall's GBFRelinkFix](https://codeberg.org/Lyall/GBFRelinkFix)
 (MIT License). GBFRelinkFix was written for game v1.x; when Relink updated to v2.0, the
 compiler regenerated the code around every hook site and **all of the original memory
-patterns stopped matching**. The upstream repository is now archived and no longer
-maintained.
+patterns stopped matching**. The upstream repo was archived when v2.0 shipped, but Lyall
+has since resumed development on Codeberg with a v2 update (see
+[Maintenance status & alternatives](#maintenance-status--alternatives)).
 
 GBFRUltrawide keeps the upstream hook *design* and ini layout, but every pattern has been
 re-hunted, disassembled, and instruction-level-verified against game **v2.0.2**. It also
@@ -33,7 +34,7 @@ the game updates again — see [`docs/PATTERNS.md`](docs/PATTERNS.md).
 
 If you need an alternative, other ultrawide fixes for Relink are:
 
-- **[Lyall/GBFRelinkFix (Codeberg)](https://codeberg.org/Lyall/GBFRelinkFix)** — the original author's own repository. Lyall appears to intend a v2 update (a `ragnarok` branch exists), but as of 2026-07-11 13:10 UTC no new release has been published there yet.
+- **[Lyall/GBFRelinkFix (Codeberg)](https://codeberg.org/Lyall/GBFRelinkFix)** — the original author's own repository. Lyall has since shipped a v2 update on Codeberg.
 - **[RetroGawd/granblue-fantasy-relink-ragnarok-ultrawide](https://github.com/RetroGawd/granblue-fantasy-relink-ragnarok-ultrawide)** — closed source; the author provides a YouTube video guide and a Discord server for support.
 
 ## Features
@@ -56,7 +57,7 @@ If you need an alternative, other ultrawide fixes for Relink are:
 | Disable TAA | `[Disable TAA]` | Turns off temporal anti-aliasing. |
 | Raise FPS cap to 240 | `[Raise Framerate Cap]` | Turns the in-game "120" option into 240. Experimental; physics can misbehave above 30 fps. |
 
-### Known limitations on v2.0.2
+### Known limitations on v2.0.3
 
 - **Gameplay FOV multiplier affects cutscenes too.** The multiplier is applied inside the
   projection-matrix builder, which serves *every* 3D camera — gameplay, cutscenes and menu
@@ -87,7 +88,7 @@ If you need an alternative, other ultrawide fixes for Relink are:
 
 ## Installing
 
-The game must be at version **v2.0.2** (see [Compatibility](#compatibility)).
+The game must be at version **v2.0.3** (see [Compatibility](#compatibility)).
 
 ### 1. Download the release
 
@@ -156,7 +157,7 @@ identical to upstream GBFRelinkFix so an existing config carries over. Key optio
 
 ## Compatibility
 
-Built and verified **exclusively for game v2.0.2** (module timestamp `1782470458`). Every
+Built and verified **exclusively for game v2.0.3** (module timestamp `1784194605`). Every
 pattern is anchored to code the v2.0.2 compiler emitted, so a **future game update will
 very likely break some or all patterns** — exactly as v2.0 broke the original mod. When
 that happens, the log flips the affected features to `MISS` and disables *only* those
@@ -202,15 +203,15 @@ The log is at **`scripts\GBFRUltrawide.log`**. For every pattern it records one 
   A `HIT` with no matching `FIRED` means the hook installed but the game never ran that
   code path — a useful signal that the pattern found the wrong (dead) copy.
 
-If ultrawide isn't applying: confirm the game is v2.0.2, that `winmm.dll` is in the game
+If ultrawide isn't applying: confirm the game is v2.0.3, that `winmm.dll` is in the game
 root, that `.asi`/`.ini` are in `scripts\`, and check the log for `MISS` lines.
 
 ## License & credits
 
-MIT — see upstream [GBFRelinkFix](https://github.com/Lyall/GBFRelinkFix) for the original
+MIT — see upstream [GBFRelinkFix](https://codeberg.org/Lyall/GBFRelinkFix) for the original
 work by **Lyall**.
 
-- [Lyall / GBFRelinkFix](https://github.com/Lyall/GBFRelinkFix) — original mod, hook design,
+- [Lyall / GBFRelinkFix](https://codeberg.org/Lyall/GBFRelinkFix) — original mod, hook design,
   and ini layout (MIT).
 - [ThirteenAG / Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) —
   ASI loading via `winmm.dll` (MIT).

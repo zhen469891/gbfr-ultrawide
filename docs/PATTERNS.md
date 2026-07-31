@@ -1,4 +1,16 @@
-# PATTERNS.md — memory pattern reference & re-hunting guide (game v2.0.2)
+# PATTERNS.md — memory pattern reference & re-hunting guide (game v2.0.2; see v2.0.3 migration note)
+
+## v2.0.3 migration note
+
+As of game **v2.0.3** (module timestamp `1784194605` / `0x6A58A62D`, was `1782470458` / `0x6A3E573A`), the exe was recompiled. Offline re-scan result: **all 29 byte-signature patterns still match and every hook lands on the same instruction** — an unusually clean recompile. Every RVA shifted, but pattern-derived sites self-heal (addresses are resolved from the matched instruction at runtime), so **only the hardcoded statics were re-pinned in source**:
+
+| region | delta (v2.0.2 -> v2.0.3) | example |
+| --- | --- | --- |
+| `0x07C2xxxx` (camera main-view ctx) | **-0x3040** | g_pCamCtx0 `0x07C25360` -> `0x07C22320` |
+| `0x06B8xxxx` (resolution / quality globals) | **-0x3030** | quality table `0x06B84210` -> `0x06B811E0` |
+| `0x054Bxxxx` (.data view-context table) | **-0x4060** | view table `0x054BF400` -> `0x054BB3A0` |
+
+Other re-pinned statics: quality-row index `0x070364D0` -> `0x07033490`; swapchain `0x07193038/40` -> `0x0718FFF8`/`0x07190000`; UI cached width `0x07021290` -> `0x0701E250`. The RVAs elsewhere in this document are the original **v2.0.2** findings (kept as provenance); apply the per-region delta above to map them to v2.0.3, or re-derive with `tools/gbfr_analyze.exe` against the current exe.
 
 This document is the maintainer's (human or AI) guide to **every memory pattern** in
 `src/dllmain.cpp`: what each one does, the exact v2.0.2 pattern, where the hook lands and

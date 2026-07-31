@@ -4,9 +4,10 @@
 //   scan   <pattern>                    - byte pattern scan over .text ("??" wildcards)
 //   xref   <targetRVAHex>               - brute-force rip-relative disp32 references to target RVA
 //
-// PE layout constants (granblue_fantasy_relink.exe v2.0.2):
+// PE layout constants (granblue_fantasy_relink.exe v2.0.3, PE ts 0x6A58A62D):
 //   .text RawPtr = 0x400, VirtAddr = 0x1000  =>  RVA = fileOffset + 0xC00
-//   .text file offset range: [0x400, 0x049AFE00)
+//   .text file offset range: [0x400, 0x049ABE00)  (RawSize 0x049ABA00)
+//   (was v2.0.2: RawEnd 0x049AFE00; .text shrank slightly in v2.0.3)
 //
 // Zydis dependency: uses the amalgamated Zydis vendored at vendor\safetyhook\.
 // Build with tools\build_tools.ps1 (adds -I..\vendor\safetyhook and compiles
@@ -24,7 +25,7 @@
 
 static const char*    kDefaultExe  = "D:\\Steam\\steamapps\\common\\Granblue Fantasy Relink\\granblue_fantasy_relink.exe";
 static const uint64_t kTextRawPtr  = 0x400;
-static const uint64_t kTextRawEnd  = 0x049AFE00;   // exclusive
+static const uint64_t kTextRawEnd  = 0x049ABE00;   // exclusive (v2.0.3: RawPtr 0x400 + RawSize 0x049ABA00)
 static const uint64_t kRvaDelta    = 0xC00;        // RVA = fileOffset + kRvaDelta
 
 static uint64_t FileOffToRva(uint64_t off) { return off + kRvaDelta; }
