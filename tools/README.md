@@ -16,11 +16,11 @@ or runs the game.
 ## Section / RVA mapping
 
 `gbfr_analyze` operates on the `.text` section and displays addresses as **RVA**. For the
-PE layout of `granblue_fantasy_relink.exe` v2.0.2 (hardcoded as source constants):
+PE layout of `granblue_fantasy_relink.exe` v2.0.4 (hardcoded as source constants):
 
 ```
 .text  RawPtr = 0x400,  VirtAddr = 0x1000   =>   RVA = fileOffset + 0xC00
-.text  file offset range: [0x400, 0x049AFE00)
+.text  file offset range: [0x400, 0x049ACC00)
 ```
 
 That is, `RVA = fileOffset + 0xC00` (constant `kRvaDelta = 0xC00`). Scanning covers `.text`
@@ -64,10 +64,10 @@ tools\gbfr_analyze.exe -f "D:\Steam\steamapps\common\Granblue Fantasy Relink\gra
   scan "48 8D 05 ?? ?? ?? ?? C5 7B 10 14 C8"
 ```
 
-Output (FPSCap pattern, should hit uniquely at RVA 0x001B6E63 on v2.0.2):
+Output (FPSCap pattern, should hit uniquely at RVA 0x001AFF53 on v2.0.4):
 
 ```
-HIT 1: fileOffset=0x001B6263  RVA=0x001B6E63
+HIT 1: fileOffset=0x001AF353  RVA=0x001AFF53
 Total hits: 1
 ```
 

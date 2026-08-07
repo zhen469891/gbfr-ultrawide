@@ -5,7 +5,7 @@ Guidance for AI agents (and humans) working in this repository.
 ## What this is
 
 **GBFRUltrawide** is an ASI plugin that adds ultrawide (21:9 / 32:9) support to
-**Granblue Fantasy Relink v2.0.3** ("Endless Ragnarok"). It is a from-scratch port of
+**Granblue Fantasy Relink v2.0.4** ("Endless Ragnarok"). It is a from-scratch port of
 [Lyall's GBFRelinkFix](https://codeberg.org/Lyall/GBFRelinkFix) (MIT), whose byte patterns
 all broke when game v2.0 shipped with a recompiled executable. The plugin is a 64-bit DLL
 (`.asi`) loaded by Ultimate ASI Loader (masquerading as `winmm.dll`).
@@ -176,7 +176,7 @@ The ready-to-use `GBFRUltrawide-v0.1.0.zip` is attached by CI a few minutes afte
 
 ## Working on the hooks — read this first
 
-This plugin patches a **specific game build (v2.0.3, module timestamp 1784194605)**. Byte
+This plugin patches a **specific game build (v2.0.4, module timestamp 1785723813)**. Byte
 patterns and struct offsets are build-specific and _will_ break on future game updates.
 
 Hard-won facts that a naive edit will get wrong:

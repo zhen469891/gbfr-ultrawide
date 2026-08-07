@@ -1,14 +1,14 @@
 # GBFRUltrawide
 
-> Custom-resolution & ultrawide (21:9 / 32:9) fix for **Granblue Fantasy: Relink v2.0.3** — a v2.0.3 rebuild of Lyall's GBFRelinkFix.
+> Custom-resolution & ultrawide (21:9 / 32:9) fix for **Granblue Fantasy: Relink v2.0.4** — a v2.0.4 rebuild of Lyall's GBFRelinkFix.
 
-Ultrawide / non-16:9 fix for **Granblue Fantasy: Relink v2.0.3**, shipped as an x64 ASI
+Ultrawide / non-16:9 fix for **Granblue Fantasy: Relink v2.0.4**, shipped as an x64 ASI
 plugin. It restores custom resolutions, correct aspect ratio, and a proper HUD on
 21:9 / 32:9 (and narrower) displays.
 
 ## What this is (and why it exists)
 
-This project is a **v2.0.3 rewrite** of [Lyall's GBFRelinkFix](https://codeberg.org/Lyall/GBFRelinkFix)
+This project is a **v2.0.4 rewrite** of [Lyall's GBFRelinkFix](https://codeberg.org/Lyall/GBFRelinkFix)
 (MIT License). GBFRelinkFix was written for game v1.x; when Relink updated to v2.0, the
 compiler regenerated the code around every hook site and **all of the original memory
 patterns stopped matching**. The upstream repo was archived when v2.0 shipped, but Lyall
@@ -57,7 +57,7 @@ If you need an alternative, other ultrawide fixes for Relink are:
 | Disable TAA | `[Disable TAA]` | Turns off temporal anti-aliasing. |
 | Raise FPS cap to 240 | `[Raise Framerate Cap]` | Turns the in-game "120" option into 240. Experimental; physics can misbehave above 30 fps. |
 
-### Known limitations on v2.0.3
+### Known limitations on v2.0.4
 
 - **Gameplay FOV multiplier affects cutscenes too.** The multiplier is applied inside the
   projection-matrix builder, which serves *every* 3D camera — gameplay, cutscenes and menu
@@ -88,7 +88,7 @@ If you need an alternative, other ultrawide fixes for Relink are:
 
 ## Installing
 
-The game must be at version **v2.0.3** (see [Compatibility](#compatibility)).
+The game must be at version **v2.0.4** (see [Compatibility](#compatibility)).
 
 ### 1. Download the release
 
@@ -157,7 +157,7 @@ identical to upstream GBFRelinkFix so an existing config carries over. Key optio
 
 ## Compatibility
 
-Built and verified **exclusively for game v2.0.3** (module timestamp `1784194605`). Every
+Built and verified **exclusively for game v2.0.4** (module timestamp `1785723813`). Every
 pattern is anchored to code the v2.0.2 compiler emitted, so a **future game update will
 very likely break some or all patterns** — exactly as v2.0 broke the original mod. When
 that happens, the log flips the affected features to `MISS` and disables *only* those
@@ -203,7 +203,7 @@ The log is at **`scripts\GBFRUltrawide.log`**. For every pattern it records one 
   A `HIT` with no matching `FIRED` means the hook installed but the game never ran that
   code path — a useful signal that the pattern found the wrong (dead) copy.
 
-If ultrawide isn't applying: confirm the game is v2.0.3, that `winmm.dll` is in the game
+If ultrawide isn't applying: confirm the game is v2.0.4, that `winmm.dll` is in the game
 root, that `.asi`/`.ini` are in `scripts\`, and check the log for `MISS` lines.
 
 ## License & credits

@@ -1,4 +1,18 @@
-# PATTERNS.md — memory pattern reference & re-hunting guide (game v2.0.2; see v2.0.3 migration note)
+# PATTERNS.md — memory pattern reference & re-hunting guide (game v2.0.2; see v2.0.4 migration note)
+
+## v2.0.4 migration note
+
+As of game **v2.0.4** (module timestamp `1785723813` / `0x6A6FFBA5`, was `1784194605` / `0x6A58A62D`), the exe was recompiled again. Offline re-scan result: **all 29 byte-signature patterns still match and every hook lands on the same instruction**. (The `ShadowQuality` pattern now also has a second, harmless coincidental hit in a data region; `PatternScan` returns the lowest-address match, which is still the real site — no functional impact.) Every RVA shifted, but pattern-derived sites self-heal, so **only the hardcoded statics were re-pinned in source**. Unlike v2.0.3's per-region deltas, **v2.0.4 was a uniform `.data` rebase: every hardcoded static shifted by exactly `+0x1280`** (verified across 6 independent addresses — old addresses went dead, the `+0x1280` addresses revived with matching xref counts).
+
+| static | v2.0.3 | v2.0.4 (+0x1280) |
+| --- | --- | --- |
+| `g_pCamCtx0` (camera main-view guard) | `0x07C22320` | `0x07C235A0` |
+| quality table (DiagDump) | `0x06B811E0` | `0x06B82460` |
+| quality-row index | `0x07033490` | `0x07034710` |
+| swapchain W / H | `0x0718FFF8` / `0x07190000` | `0x07191278` / `0x07191280` |
+| UI cached width | `0x0701E250` | `0x0701F4D0` |
+
+To map a v2.0.2 finding elsewhere in this document to v2.0.4: apply the v2.0.2 -> v2.0.3 per-region delta below, then add `+0x1280` — or just re-derive with `tools/gbfr_analyze.exe` against the current exe.
 
 ## v2.0.3 migration note
 

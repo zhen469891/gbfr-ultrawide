@@ -1,19 +1,23 @@
-// GBFRUltrawide - ultrawide fix for Granblue Fantasy Relink v2.0.3
+// GBFRUltrawide - ultrawide fix for Granblue Fantasy Relink v2.0.4
 // Derived from Lyall's GBFRelinkFix (https://codeberg.org/Lyall/GBFRelinkFix), MIT License.
 // Changes vs upstream: spdlog removed (minimal built-in logger), renamed to GBFRUltrawide,
 // explicit HIT/MISS logging for every pattern scan, nullptr-safe scan handling.
 //
-// ===== v2.0.3 migration note (module timestamp 1782470458/0x6A3E573A -> 1784194605/0x6A58A62D) =====
-// The v2.0.3 update recompiled the exe: every RVA shifted, but ALL 29 byte-signature
+// ===== v2.0.4 migration note (module timestamp 1784194605/0x6A58A62D -> 1785723813/0x6A6FFBA5) =====
+// The v2.0.4 update recompiled the exe again: every RVA shifted, but ALL 29 byte-signature
 // patterns still match and every hook still lands on the same instruction (offline-verified).
 // Pattern-derived sites self-heal (addresses resolved from the matched instruction), so only
-// the HARDCODED statics below were re-pinned for v2.0.3:
-//   - g_pCamCtx0 (CamDistCommit main-view guard): 0x07C25360 -> 0x07C22320
-//   - DiagDump resolution/quality/swapchain globals: 0x06B8xxxx region -0x3030
-//     (quality table 0x06B84210 -> 0x06B811E0), 0x070364D0 -> 0x07033490,
-//     swapchain 0x07193038/40 -> 0x0718FFF8/0x07190000, uiCachedW 0x07021290 -> 0x0701E250
-//   - DiagCam2Watchdog statics (dev-only): 0x07C2xxxx region -0x3040
-// Per-region deltas observed: 0x07C2xxxx -0x3040, 0x06B8xxxx -0x3030, 0x054Bxxxx -0x4060.
+// the HARDCODED statics below were re-pinned for v2.0.4. Unlike v2.0.3's per-region deltas,
+// v2.0.4 was a UNIFORM .data rebase: every hardcoded static shifted by exactly +0x1280
+// (verified across 6 independent addresses - old addrs went dead, the +0x1280 addrs revived
+// with matching xref counts; e.g. g_pCamCtx0 xrefs 43 -> 4 at the old addr, 43 at +0x1280):
+//   - g_pCamCtx0 (CamDistCommit main-view guard): 0x07C22320 -> 0x07C235A0
+//   - DiagDump resolution/quality/swapchain globals: 0x06B8xxxx / 0x0701xxxx region +0x1280
+//     (quality table 0x06B811E0 -> 0x06B82460), 0x07033490 -> 0x07034710,
+//     swapchain 0x0718FFF8/0x07190000 -> 0x07191278/0x07191280, uiCachedW 0x0701E250 -> 0x0701F4D0
+//   - DiagCam2Watchdog statics (dev-only): 0x07C2xxxx region +0x1280
+// Deltas by version: v2.0.3->v2.0.4 uniform +0x1280; earlier v2.0.2->v2.0.3 was per-region
+// (0x07C2xxxx -0x3040, 0x06B8xxxx -0x3030, 0x054Bxxxx -0x4060).
 // Other RVAs in this file's comments are kept as v2.0.2 provenance; see docs/PATTERNS.md.
 // ====================================================================================================
 
@@ -1448,7 +1452,7 @@ void AspectFOVFix()
         // (v1 divided the camera-message FOV by fAspectMultiplier; v2.0.2's camera
         // message no longer carries FOV, and ProjMatrixFOV is a plain multiplier with
         // no aspect term).
-        LogWarn("Gameplay FOV vert- compensation is NOT SUPPORTED on game v2.0.3 (the camera message no longer carries FOV) - gameplay FOV stays uncorrected below 16:9");
+        LogWarn("Gameplay FOV vert- compensation is NOT SUPPORTED on game v2.0.4 (the camera message no longer carries FOV) - gameplay FOV stays uncorrected below 16:9");
         // [FIXED v2.0.2] Cutscene FOV: 4 hits, PatternScan returns the first.
         // All 4 hits are identical inlined copies of the cutscene path; only the first is hooked for now.
         // This hook is only installed when fAspectRatio < 16:9, so 21:9 users are unaffected either way.
@@ -1542,17 +1546,17 @@ void CamDistCommit()
         return;   // m == 1.0 and (release, or dev with CamDiag off) -> zero overhead
 
     // Static main-view ctx: resolved once, only COMPARED against rsi (never dereferenced
-    // through the hook). base + 0x07C22320 = ctx0 (v2.0.3; v2.0.2 was 0x07C25360 - the
-    // 0x07C2xxxx region shifted -0x3040 in the recompile; re-pinned via CamDistPreset
-    // publish target - 0x3C0, xref-confirmed live. CAMDIST_HUNT2/3, PATTERNS.md 2.8/2.9).
-    g_pCamCtx0 = reinterpret_cast<const uint8_t*>((uintptr_t)baseModule + 0x07C22320);
+    // through the hook). base + 0x07C235A0 = ctx0 (v2.0.4; v2.0.3 was 0x07C22320, v2.0.2
+    // 0x07C25360 - v2.0.4 rebased the whole .data +0x1280 in the recompile; re-pinned and
+    // xref-confirmed live (43 refs, matching the v2.0.3 baseline). CAMDIST_HUNT2/3, PATTERNS.md 2.8/2.9).
+    g_pCamCtx0 = reinterpret_cast<const uint8_t*>((uintptr_t)baseModule + 0x07C235A0);
 
     // --- The one mid-hook on the eye store 0x00692497 (multiply + dev counting) ---
     uint8_t* EyeStoreHit = Memory::PatternScan(baseModule,
         "C5 F8 29 46 10 C5 F8 29 4E 20 C5 F8 28 86 20 01 00 00 C5 F8 29 46 30");
     if (EyeStoreHit)
     {
-        LogInfo("HIT: CamDistCommit: %s+0x%llx (hook at +0x0; ctx0 %s+0x7C22320, multiplier %g)",
+        LogInfo("HIT: CamDistCommit: %s+0x%llx (hook at +0x0; ctx0 %s+0x7C235A0, multiplier %g)",
             sExeName.c_str(), ModOffset(EyeStoreHit), sExeName.c_str(), fCamDistMulti);
 
         static SafetyHookMid CamDistCommitHook{};
@@ -2521,25 +2525,25 @@ void FPSCap()
 }
 
 // One-shot diagnostic dump of every resolution-related location we know of
-// (v2.0.3 RVAs; re-pinned from the v2.0.2 hunt after the recompile - the 0x06B8xxxx
-// region shifted -0x3030, see the v2.0.3 migration note). Tells us which layer still thinks 16:9.
+// (v2.0.4 RVAs; re-pinned after the recompile - the whole .data rebased +0x1280 uniformly,
+// see the v2.0.4 migration note). Tells us which layer still thinks 16:9.
 static void DiagDump()
 {
     Sleep(20000);
     auto rd = [](uintptr_t rva) { return *reinterpret_cast<uint32_t*>((uintptr_t)baseModule + rva); };
     LogInfo("DIAG: globals fallback=%ux%u active_render=%ux%u src_render=%ux%u window_ref=%ux%u",
-        rd(0x06B81050), rd(0x06B81054), rd(0x06B81058), rd(0x06B8105C),
-        rd(0x06B81060), rd(0x06B81064), rd(0x06B81068), rd(0x06B8106C));
+        rd(0x06B822D0), rd(0x06B822D4), rd(0x06B822D8), rd(0x06B822DC),
+        rd(0x06B822E0), rd(0x06B822E4), rd(0x06B822E8), rd(0x06B822EC));
     LogInfo("DIAG: quality row idx=%u | row5 render=%ux%u window=%ux%u",
-        rd(0x07033490),
-        rd(0x06B811E0 + 5 * 0x4C + 0x24), rd(0x06B811E0 + 5 * 0x4C + 0x28),
-        rd(0x06B811E0 + 5 * 0x4C + 0x2C), rd(0x06B811E0 + 5 * 0x4C + 0x30));
-    LogInfo("DIAG: swapchain=%ux%u | uiCachedW=%u", rd(0x0718FFF8), rd(0x07190000), rd(0x0701E250));
+        rd(0x07034710),
+        rd(0x06B82460 + 5 * 0x4C + 0x24), rd(0x06B82460 + 5 * 0x4C + 0x28),
+        rd(0x06B82460 + 5 * 0x4C + 0x2C), rd(0x06B82460 + 5 * 0x4C + 0x30));
+    LogInfo("DIAG: swapchain=%ux%u | uiCachedW=%u", rd(0x07191278), rd(0x07191280), rd(0x0701F4D0));
     // [issue #3] src_render + the derived downsampled-blur buffer (GaussScaledTarget family,
     // shared by the pause/modal backdrop). Buffer size was ruled out as the tiling cause
     // (1920x1080 tiles just like 960x540 did); kept as a general resolution-path diagnostic.
     LogInfo("DIAG: src_render=%ux%u | gauss_buffer=%ux%u",
-        rd(0x06B81060), rd(0x06B81064), rd(0x06B8104C), rd(0x06B81048));
+        rd(0x06B822E0), rd(0x06B822E4), rd(0x06B822CC), rd(0x06B822C8));
 }
 
 #ifdef GBFR_DEVBUILD
@@ -2572,7 +2576,7 @@ static void DiagDump()
 //      from the SHIPPING 0x00692497 mid-hook - the real per-frame commit site. See
 //      the stream-F block below. (The old stream B - four dead rip-relative commit
 //      sites - was removed with that hook; only stream F carries commit counts now.)
-// All statics are v2.0.3 RVAs (module timestamp 1784194605), same version-pinned
+// All statics are v2.0.4 RVAs (module timestamp 1785723813), same version-pinned
 // convention as DiagDump. Heap reads (behavior object) are VirtualQuery-guarded
 // (ADR-0002 defensive practice); exe-image statics are always committed.
 // Everything logs ON CHANGE only, greppable prefix "DIAG-CAM2:", shared hard budget
@@ -2603,16 +2607,16 @@ static void DiagCam2Watchdog()
     int iLines = 0;
 
     const uintptr_t base = (uintptr_t)baseModule;
-    const uintptr_t committedEye = base + 0x07C22330;   // mainView+0x10
-    const uintptr_t committedAt  = base + 0x07C22340;   // mainView+0x20
-    const uintptr_t stagedEye    = base + 0x07C22630;   // mainView+0x310
-    const uintptr_t stagedAt     = base + 0x07C22640;   // mainView+0x320
-    const uintptr_t behaviorPtr  = base + 0x07C223F8;   // mainView+0xD8
-    const uintptr_t flagManual   = base + 0x07C226D1;   // mainView+0x3B1
-    const uintptr_t flagRecommit = base + 0x07C226D3;   // mainView+0x3B3
+    const uintptr_t committedEye = base + 0x07C235B0;   // mainView+0x10
+    const uintptr_t committedAt  = base + 0x07C235C0;   // mainView+0x20
+    const uintptr_t stagedEye    = base + 0x07C238B0;   // mainView+0x310
+    const uintptr_t stagedAt     = base + 0x07C238C0;   // mainView+0x320
+    const uintptr_t behaviorPtr  = base + 0x07C23678;   // mainView+0xD8
+    const uintptr_t flagManual   = base + 0x07C23951;   // mainView+0x3B1
+    const uintptr_t flagRecommit = base + 0x07C23953;   // mainView+0x3B3
 
-    LogInfo("DIAG-CAM2: watchdog armed - committed eye/at %s+0x7C22330/40, staged +0x7C22630/40, "
-        "behavior [%s+0x7C223F8], flags +0x7C226D1/D3; 1s sampling, counters every 5s, "
+    LogInfo("DIAG-CAM2: watchdog armed - committed eye/at %s+0x7C235B0/C0, staged +0x7C238B0/C0, "
+        "behavior [%s+0x7C23678], flags +0x7C23951/53; 1s sampling, counters every 5s, "
         "log-on-change, shared budget %d lines", sExeName.c_str(), sExeName.c_str(), kMaxLines);
 
     // Stream A state (distances; units unknown - log raw).
