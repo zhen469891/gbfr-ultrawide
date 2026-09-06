@@ -451,13 +451,13 @@ void Logging()
 void ReadConfig()
 {
     // Initialise config
-    std::ifstream iniFile("scripts\\" + sConfigFile);
+    std::ifstream iniFile(sExePath / "scripts" / sConfigFile);
     if (!iniFile)
     {
         LogError("Failed to load config file.");
         LogInfo("Trying alternate path.");
 
-        std::ifstream iniFile(sConfigFile);
+        std::ifstream iniFile(sExePath / sConfigFile);
         if (!iniFile)
         {
             LogError("Make sure %s is present in the game folder.", sConfigFile.c_str());
@@ -494,7 +494,7 @@ void ReadConfig()
     inipp::Ini<char> devIni;
     std::string sDevConfigFile = "GBFRUltrawide.dev.ini";
     {
-        std::ifstream devIniFile("scripts\\" + sDevConfigFile);
+        std::ifstream devIniFile(sExePath / "scripts" / sDevConfigFile);
         if (devIniFile)
         {
             LogInfo("Path to dev config file: %s", (sExePath.string() + "scripts\\" + sDevConfigFile).c_str());
@@ -503,7 +503,7 @@ void ReadConfig()
         else
         {
             // Same alternate-path fallback as the main ini (game root).
-            std::ifstream devIniFileAlt(sDevConfigFile);
+            std::ifstream devIniFileAlt(sExePath / sDevConfigFile);
             if (devIniFileAlt)
             {
                 LogInfo("Path to dev config file: %s", (sExePath.string() + sDevConfigFile).c_str());
@@ -1549,15 +1549,21 @@ void CamDistCommit()
     // through the hook). base + 0x07C235A0 = ctx0 (v2.0.4; v2.0.3 was 0x07C22320, v2.0.2
     // 0x07C25360 - v2.0.4 rebased the whole .data +0x1280 in the recompile; re-pinned and
     // xref-confirmed live (43 refs, matching the v2.0.3 baseline). CAMDIST_HUNT2/3, PATTERNS.md 2.8/2.9).
-    g_pCamCtx0 = reinterpret_cast<const uint8_t*>((uintptr_t)baseModule + 0x07C235A0);
+    // Steam build 24719688 (PE 0x6A7DA26E): the first of ten view-update calls
+    // at RVA 0x22ADA9 loads ctx0 = 0x07C23820. The old address silently rejects
+    // every live main-view update. Keep the prior verified build supported too.
+    const uintptr_t mainViewRva = Memory::ModuleTimestamp(baseModule) == 0x6A7DA26E
+        ? 0x07C23820 : 0x07C235A0;
+    g_pCamCtx0 = reinterpret_cast<const uint8_t*>((uintptr_t)baseModule + mainViewRva);
 
     // --- The one mid-hook on the eye store 0x00692497 (multiply + dev counting) ---
     uint8_t* EyeStoreHit = Memory::PatternScan(baseModule,
         "C5 F8 29 46 10 C5 F8 29 4E 20 C5 F8 28 86 20 01 00 00 C5 F8 29 46 30");
     if (EyeStoreHit)
     {
-        LogInfo("HIT: CamDistCommit: %s+0x%llx (hook at +0x0; ctx0 %s+0x7C235A0, multiplier %g)",
-            sExeName.c_str(), ModOffset(EyeStoreHit), sExeName.c_str(), fCamDistMulti);
+        LogInfo("HIT: CamDistCommit: %s+0x%llx (hook at +0x0; ctx0 %s+0x%llx, multiplier %g)",
+            sExeName.c_str(), ModOffset(EyeStoreHit), sExeName.c_str(),
+            static_cast<unsigned long long>(mainViewRva), fCamDistMulti);
 
         static SafetyHookMid CamDistCommitHook{};
         CamDistCommitHook = safetyhook::create_mid(EyeStoreHit,
@@ -1629,6 +1635,11 @@ void CamDistCommit()
                 }
             });
 
+        if (!CamDistCommitHook)
+        {
+            LogError("CamDistCommit: hook creation failed - camera distance multiplier disabled");
+            return;
+        }
         if (bMulti)
             LogInfo("CamDistCommit: multiplier %g installed (main view eye dollied about the look-at; cutscenes unaffected by the [rcx+0xC0] gate). "
                 "Known limitation: wall-collision is computed upstream, so m > 1 can clip the eye into walls.", fCamDistMulti);
@@ -2529,6 +2540,13 @@ void FPSCap()
 // see the v2.0.4 migration note). Tells us which layer still thinks 16:9.
 static void DiagDump()
 {
+    // These optional diagnostics still use v2.0.4 resolution globals. Actual
+    // resolution patches derive their table addresses from instructions.
+    if (Memory::ModuleTimestamp(baseModule) != 0x6A6FFBA5)
+    {
+        LogInfo("DIAG: legacy resolution-global dump skipped for this build");
+        return;
+    }
     Sleep(20000);
     auto rd = [](uintptr_t rva) { return *reinterpret_cast<uint32_t*>((uintptr_t)baseModule + rva); };
     LogInfo("DIAG: globals fallback=%ux%u active_render=%ux%u src_render=%ux%u window_ref=%ux%u",
@@ -2606,18 +2624,18 @@ static void DiagCam2Watchdog()
     constexpr int kMaxLines = 128;   // shared change-line budget per session
     int iLines = 0;
 
-    const uintptr_t base = (uintptr_t)baseModule;
-    const uintptr_t committedEye = base + 0x07C235B0;   // mainView+0x10
-    const uintptr_t committedAt  = base + 0x07C235C0;   // mainView+0x20
-    const uintptr_t stagedEye    = base + 0x07C238B0;   // mainView+0x310
-    const uintptr_t stagedAt     = base + 0x07C238C0;   // mainView+0x320
-    const uintptr_t behaviorPtr  = base + 0x07C23678;   // mainView+0xD8
-    const uintptr_t flagManual   = base + 0x07C23951;   // mainView+0x3B1
-    const uintptr_t flagRecommit = base + 0x07C23953;   // mainView+0x3B3
+    if (!g_pCamCtx0) return;
+    const uintptr_t mainView = reinterpret_cast<uintptr_t>(g_pCamCtx0);
+    const uintptr_t committedEye = mainView + 0x10;
+    const uintptr_t committedAt  = mainView + 0x20;
+    const uintptr_t stagedEye    = mainView + 0x310;
+    const uintptr_t stagedAt     = mainView + 0x320;
+    const uintptr_t behaviorPtr  = mainView + 0xD8;
+    const uintptr_t flagManual   = mainView + 0x3B1;
+    const uintptr_t flagRecommit = mainView + 0x3B3;
 
-    LogInfo("DIAG-CAM2: watchdog armed - committed eye/at %s+0x7C235B0/C0, staged +0x7C238B0/C0, "
-        "behavior [%s+0x7C23678], flags +0x7C23951/53; 1s sampling, counters every 5s, "
-        "log-on-change, shared budget %d lines", sExeName.c_str(), sExeName.c_str(), kMaxLines);
+    LogInfo("DIAG-CAM2: watchdog armed - main view %s+0x%llx; 1s sampling, counters every 5s, budget %d lines",
+        sExeName.c_str(), ModOffset(const_cast<uint8_t*>(g_pCamCtx0)), kMaxLines);
 
     // Stream A state (distances; units unknown - log raw).
     float fLastCommitted = 0.0f, fLastStaged = 0.0f;
@@ -2798,6 +2816,12 @@ static void DiagCam2Watchdog()
 DWORD __stdcall Main(void*)
 {
     Logging();
+    const auto timestamp = Memory::ModuleTimestamp(baseModule);
+    if (timestamp != 0x6A6FFBA5 && timestamp != 0x6A7DA26E)
+    {
+        LogError("Unsupported game build (PE timestamp 0x%08X): no patches installed. Update GBFRUltrawide for this executable.", timestamp);
+        return 0;
+    }
     ReadConfig();
     ApplyResolution();
     Sleep(iInjectionDelay);
